@@ -83,6 +83,10 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   const [serverBacked, setServerBacked] = useState(false);
   const stateQuery = trpc.studio.state.useQuery(undefined, { retry: 1, refetchOnWindowFocus: false });
   const saveState = trpc.studio.saveState.useMutation();
+  const editorialCommand = trpc.studio.command.useMutation({
+    onSuccess: data => setState(data as StudioState),
+    onError: error => toast.error("Operação recusada pelo servidor", { description: `${error.message} Tente de novo.` }),
+  });
   const importState = trpc.studio.importState.useMutation({ onSuccess: () => { setState(deviceSnapshot.current); setServerBacked(true); toast.success("Dados deste aparelho importados para o Neon"); }, onError: error => toast.error("Importação indisponível", { description: `${error.message} Tente de novo.` }) });
 
   useEffect(() => {
@@ -108,260 +112,55 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   };
 
   const createIdea: StudioActions["createIdea"] = params => {
-    const idea: Idea = {
-      id: crypto.randomUUID(),
-      title: params.title,
-      format: params.format,
-      trendId: params.trendId,
-      origin: params.origin ?? (params.trendId ? "Radar" : "Projeto"),
-      angle: params.angle ?? "Tutorial com demonstração real, decisão técnica e resultado mensurável.",
-      audience: "Devs que constroem com IA",
-      keywords: ["programação", "agentes IA", params.format.toLowerCase()],
-      status: "pesquisa",
-      createdAt: "agora",
-    };
-    setState(current => ({
-      ...current,
-      ideas: [idea, ...current.ideas],
-      audit: [
-        { id: crypto.randomUUID(), actor: "Você", action: "Pauta criada", target: idea.title, at: "agora", detail: `Origem: ${idea.origin}` },
-        ...current.audit,
-      ],
-    }));
-    toast.success("Pauta criada", { description: "Ela entrou na etapa de pesquisa." });
+    const idea: Idea = { id: crypto.randomUUID(), title: params.title, format: params.format, trendId: params.trendId, origin: params.origin ?? (params.trendId ? "Radar" : "Projeto"), angle: params.angle ?? "Tutorial com demonstração real, decisão técnica e resultado mensurável.", audience: "Devs que constroem com IA", keywords: ["programação", "agentes IA", params.format.toLowerCase()], status: "pesquisa", createdAt: new Date().toISOString() };
+    editorialCommand.mutate({ operation: "createIdea", title: params.title, format: params.format, origin: idea.origin, trendId: params.trendId, angle: idea.angle });
     return idea;
   };
 
   const updateScript: StudioActions["updateScript"] = (id, content) => {
-    setState(current => {
-      const script = current.scripts.find(item => item.id === id);
-      if (!script) return current;
-      const entry: AuditEntry = { id: crypto.randomUUID(), actor: "Você", action: "Roteiro salvo", target: script.title, at: new Date().toISOString(), detail: `Versão ${script.version}` };
-      return {
-        ...current,
-        scripts: current.scripts.map(item => item.id === id ? { ...item, content, updatedAt: "agora" } : item),
-        audit: [entry, ...current.audit].slice(0, 500),
-      };
-    });
+    editorialCommand.mutate({ operation: "updateScript", scriptId: id, content });
   };
 
   const generateScript: StudioActions["generateScript"] = (ideaId, generatedContent) => {
-    const currentIdea = state.ideas.find(item => item.id === ideaId);
-    if (!currentIdea) {
-      toast.error("Pauta não encontrada");
-      return;
-    }
-    const guard = canGenerateScript(currentIdea.status);
-    if (!guard.allowed) {
-      toast.error("Geração de roteiro bloqueada", { description: guard.reason });
-      return;
-    }
-    setState(current => {
-      const idea = current.ideas.find(item => item.id === ideaId);
-      if (!idea) return current;
-      const existing = current.scripts.find(script => script.ideaId === ideaId);
-      const generated: Script = existing ?? {
-        id: crypto.randomUUID(),
-        ideaId,
-        version: 1,
-        title: idea.title,
-        content: generatedContent ?? `# Gancho — 0:00\nMostre em 10 segundos o resultado real de: ${idea.title}.\n\n# Problema — 0:18\nExplique o custo de fazer isso sem uma stack clara.\n\n# Demonstração real — 0:55\nAbra o projeto, rode o código, mostre uma decisão técnica e um erro que foi corrigido.\n\n# Resultado — 5:40\nCompare antes/depois e mostre o artefato final.\n\n# CTA — 6:30\nConvide para o próximo passo prático, sem promessa genérica.`,
-        status: "Aguardando aprovação",
-        updatedAt: "agora",
-      };
-      return {
-        ...current,
-        ideas: current.ideas.map(item => item.id === ideaId ? { ...item, status: "aguarda_aprov_roteiro" } : item),
-        scripts: existing ? current.scripts.map(script => script.id === existing.id ? { ...script, version: script.version + 1, status: "Aguardando aprovação", updatedAt: "agora" } : script) : [generated, ...current.scripts],
-        audit: [{ id: crypto.randomUUID(), actor: "Nexo", action: "Roteiro gerado", target: idea.title, at: "agora", detail: "Template tutorial com demonstração real" }, ...current.audit],
-      };
-    });
-    toast.success("Roteiro pronto para sua aprovação");
+    const idea = state.ideas.find(item => item.id === ideaId);
+    if (!idea) return toast.error("Pauta não encontrada");
+    const guard = canGenerateScript(idea.status);
+    if (!guard.allowed) return toast.error("Geração de roteiro bloqueada", { description: guard.reason });
+    const content = generatedContent ?? `# Gancho — 0:00
+Mostre o resultado real de: ${idea.title}.`;
+    editorialCommand.mutate({ operation: "generateScript", ideaId, content });
   };
 
   const approveScript: StudioActions["approveScript"] = ideaId => {
-    const currentIdea = state.ideas.find(item => item.id === ideaId);
-    const currentScript = state.scripts.find(item => item.ideaId === ideaId);
-    const guard = currentIdea && currentScript ? canApproveScript(currentIdea.status, currentScript.status) : { allowed: false as const, reason: "Roteiro não encontrado." };
-    if (!guard.allowed) {
-      toast.error("Este roteiro não está elegível para aprovação", { description: guard.reason });
-      return;
-    }
-    setState(current => {
-      const idea = current.ideas.find(item => item.id === ideaId);
-      if (!idea) return current;
-      return {
-        ...current,
-        ideas: current.ideas.map(item => item.id === ideaId ? { ...item, status: "assets" } : item),
-        scripts: current.scripts.map(script => script.ideaId === ideaId ? { ...script, status: "Aprovado", updatedAt: "agora" } : script),
-        audit: [{ id: crypto.randomUUID(), actor: "Você", action: "Portão 1 aprovado", target: idea.title, at: "agora", detail: "Liberado para assets e produção" }, ...current.audit],
-      };
-    });
-    toast.success("Roteiro aprovado", { description: "A produção pode começar." });
+    editorialCommand.mutate({ operation: "approveScript", ideaId });
   };
 
   const requestScriptChanges: StudioActions["requestScriptChanges"] = ideaId => {
-    const currentIdea = state.ideas.find(item => item.id === ideaId);
-    if (!currentIdea || currentIdea.status !== "aguarda_aprov_roteiro") {
-      toast.error("Ajuste indisponível", { description: "Apenas roteiros aguardando o Portão 1 podem voltar para revisão." });
-      return;
-    }
-    setState(current => ({
-      ...current,
-      ideas: current.ideas.map(item => item.id === ideaId ? { ...item, status: "ajuste_pedido" } : item),
-      scripts: current.scripts.map(script => script.ideaId === ideaId ? { ...script, status: "Ajuste pedido" } : script),
-      audit: [{ id: crypto.randomUUID(), actor: "Você", action: "Ajuste solicitado", target: current.ideas.find(item => item.id === ideaId)?.title ?? "Roteiro", at: "agora", detail: "Voltou para revisão" }, ...current.audit],
-    }));
-    toast.message("Roteiro devolvido para ajuste");
+    editorialCommand.mutate({ operation: "requestScriptChanges", ideaId });
   };
 
   const startRender: StudioActions["startRender"] = ideaId => {
-    const idea = state.ideas.find(item => item.id === ideaId);
-    const script = state.scripts.find(item => item.ideaId === ideaId);
-    if (!idea || !script) {
-      toast.error("Render bloqueado", { description: "Pauta ou roteiro não encontrado." });
-      return;
-    }
-    const guard = canStartRender(idea.status, script.status);
-    if (!guard.allowed) {
-      toast.error("Render bloqueado", { description: guard.reason });
-      return;
-    }
-
-    let videoId = "";
-    setState(current => {
-      const existing = current.videos.find(video => video.ideaId === ideaId);
-      const video: Video = existing ?? {
-        id: crypto.randomUUID(), ideaId, scriptId: script.id, title: idea.title, format: idea.format,
-        stage: "render", duration: idea.format === "Short" ? "00:48" : "07:18", synthetic: false,
-        qa: [
-          { label: "Duração e ritmo", passed: true, note: "Dentro da meta definida" },
-          { label: "Legenda em PT-BR", passed: true, note: "Gerada e sincronizada" },
-          { label: "Licenças dos assets", passed: true, note: "Assets próprios ou permitidos" },
-          { label: "Demonstração original", passed: true, note: "Execução registrada" },
-        ],
-      };
-      videoId = video.id;
-      const job: RenderJob = { id: crypto.randomUUID(), videoId: video.id, status: "rendering", attempts: (current.renderJobs.find(item => item.videoId === video.id)?.attempts ?? 0) + 1, startedAt: new Date().toISOString() };
-      return {
-        ...current,
-        ideas: current.ideas.map(item => item.id === ideaId ? { ...item, status: "render" } : item),
-        videos: existing ? current.videos.map(item => item.id === existing.id ? { ...item, stage: "render" } : item) : [{ ...video, stage: "render" }, ...current.videos],
-        renderJobs: [job, ...current.renderJobs.filter(item => item.videoId !== video.id)],
-        audit: ([{ id: crypto.randomUUID(), actor: "Sistema", action: "Job de render iniciado", target: idea.title, at: new Date().toISOString(), detail: `Tentativa ${job.attempts}` }, ...current.audit] as AuditEntry[]).slice(0, 500),
-      };
-    });
-    toast.message("Render iniciado", { description: "A fila passou por render e seguirá para QA." });
-
-    window.setTimeout(() => {
-      setState(current => ({
-        ...current,
-        videos: current.videos.map(video => video.id === videoId ? { ...video, stage: "qa" } : video),
-        ideas: current.ideas.map(item => item.id === ideaId ? { ...item, status: "qa" } : item),
-        renderJobs: current.renderJobs.map(job => job.videoId === videoId ? { ...job, status: "qa" } : job),
-        audit: ([{ id: crypto.randomUUID(), actor: "Sistema", action: "QA iniciado", target: idea.title, at: new Date().toISOString(), detail: "Checklist automático em execução" }, ...current.audit] as AuditEntry[]).slice(0, 500),
-      }));
-    }, 550);
-    window.setTimeout(() => {
-      setState(current => ({
-        ...current,
-        videos: current.videos.map(video => video.id === videoId ? { ...video, stage: "aguarda_aprov_video" } : video),
-        ideas: current.ideas.map(item => item.id === ideaId ? { ...item, status: "aguarda_aprov_video" } : item),
-        renderJobs: current.renderJobs.map(job => job.videoId === videoId ? { ...job, status: "succeeded", finishedAt: new Date().toISOString() } : job),
-        audit: ([{ id: crypto.randomUUID(), actor: "Sistema", action: "Render e QA concluídos", target: idea.title, at: new Date().toISOString(), detail: "Pronto para o Portão 2" }, ...current.audit] as AuditEntry[]).slice(0, 500),
-      }));
-      toast.success("Prévia pronta", { description: "O Portão 2 agora está disponível." });
-    }, 1150);
+    editorialCommand.mutate({ operation: "startRender", ideaId });
   };
 
   const approveVideo: StudioActions["approveVideo"] = (videoId, options = {}) => {
-    const video = state.videos.find(item => item.id === videoId);
-    const idea = video ? state.ideas.find(item => item.id === video.ideaId) : undefined;
-    const script = video ? state.scripts.find(item => item.id === video.scriptId) : undefined;
-    if (!video || !idea || !script) {
-      toast.error("Aprovação final bloqueada", { description: "Vídeo, pauta ou roteiro não encontrado." });
-      return;
-    }
-    const hasQaWarning = video.qa.some(item => !item.passed);
-    const guard = canApproveVideo(video.stage, idea.status, script.status, video.qa.length > 0);
-    if (!guard.allowed) {
-      toast.error("Aprovação final bloqueada", { description: guard.reason });
-      return;
-    }
-    if (hasQaWarning && !options.overrideQa) {
-      toast.warning("Há alertas no QA", { description: "Confirme explicitamente a aprovação com ressalva." });
-      return;
-    }
-    setState(current => ({
-      ...current,
-      videos: current.videos.map(item => item.id === videoId ? { ...item, stage: "aprovado_para_agenda" } : item),
-      ideas: current.ideas.map(item => item.id === video.ideaId ? { ...item, status: "aprovado_para_agenda" } : item),
-      audit: ([{ id: crypto.randomUUID(), actor: "Você", action: "Portão 2 aprovado", target: video.title, at: new Date().toISOString(), detail: hasQaWarning ? "Aprovado com ressalva de QA" : "Liberado para agendamento" }, ...current.audit] as AuditEntry[]).slice(0, 500),
-    }));
-    toast.success("Vídeo aprovado", { description: "Ele está liberado para você reservar um horário." });
+    editorialCommand.mutate({ operation: "approveVideo", videoId, overrideQa: Boolean(options.overrideQa) });
   };
 
   const requestVideoChanges: StudioActions["requestVideoChanges"] = videoId => {
-    const video = state.videos.find(item => item.id === videoId);
-    if (!video) {
-      toast.error("Ajuste indisponível", { description: "Vídeo não encontrado." });
-      return;
-    }
-    const guard = canRequestVideoAdjustment(video.stage);
-    if (!guard.allowed) {
-      toast.error("Ajuste indisponível", { description: guard.reason });
-      return;
-    }
-    setState(current => ({
-      ...current,
-      videos: current.videos.map(item => item.id === videoId ? { ...item, stage: "ajuste_pedido" } : item),
-      ideas: current.ideas.map(item => item.id === video.ideaId ? { ...item, status: "assets" } : item),
-      audit: ([{ id: crypto.randomUUID(), actor: "Você", action: "Ajuste solicitado", target: video.title, at: new Date().toISOString(), detail: "Retornou à etapa de assets" }, ...current.audit] as AuditEntry[]).slice(0, 500),
-    }));
-    toast.message("Vídeo devolvido para ajuste");
+    editorialCommand.mutate({ operation: "requestVideoChanges", videoId });
   };
 
   const scheduleVideo: StudioActions["scheduleVideo"] = videoId => {
-    const video = state.videos.find(item => item.id === videoId);
-    if (!video) {
-      toast.error("Agendamento bloqueado", { description: "Vídeo não encontrado." });
-      return;
-    }
-    const guard = canSchedule(video.stage);
-    if (!guard.allowed) {
-      toast.error("Agendamento bloqueado", { description: guard.reason });
-      return;
-    }
-    const schedule = new Intl.DateTimeFormat("pt-BR", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(Date.now() + 1000 * 60 * 60 * 24 * 2));
-    setState(current => ({
-      ...current,
-      videos: current.videos.map(item => item.id === videoId ? { ...item, stage: "agendado", scheduledFor: schedule } : item),
-      ideas: current.ideas.map(item => item.id === video.ideaId ? { ...item, status: "agendado" } : item),
-      audit: ([{ id: crypto.randomUUID(), actor: "Você", action: "Publicação agendada", target: video.title, at: new Date().toISOString(), detail: "Modo seguro: exportação manual até conectar YouTube" }, ...current.audit] as AuditEntry[]).slice(0, 500),
-    }));
-    toast.success("Slot reservado", { description: "O upload continuará manual até o YouTube estar conectado." });
+    editorialCommand.mutate({ operation: "scheduleVideo", videoId });
   };
 
   const retryVideo: StudioActions["retryVideo"] = videoId => {
-    const video = state.videos.find(item => item.id === videoId);
-    if (!video || video.stage !== "erro") {
-      toast.message("Nenhuma nova tentativa necessária", { description: "Apenas jobs com erro podem ser reprocessados." });
-      return;
-    }
-    setState(current => ({
-      ...current,
-      ideas: current.ideas.map(item => item.id === video.ideaId ? { ...item, status: "assets" } : item),
-      audit: ([{ id: crypto.randomUUID(), actor: "Você", action: "Nova tentativa solicitada", target: video.title, at: new Date().toISOString(), detail: "Retornou à etapa de assets" }, ...current.audit] as AuditEntry[]).slice(0, 500),
-    }));
-    toast.message("Nova tentativa liberada", { description: "Revise os assets e inicie um novo render." });
+    editorialCommand.mutate({ operation: "retryVideo", videoId });
   };
 
   const addAsset: StudioActions["addAsset"] = asset => {
-    setState(current => ({
-      ...current,
-      assets: [{ ...asset, id: crypto.randomUUID() }, ...current.assets],
-      audit: [{ id: crypto.randomUUID(), actor: "Você", action: "Asset registrado", target: asset.label, at: "agora", detail: `Licença: ${asset.license}` }, ...current.audit],
-    }));
+    editorialCommand.mutate({ operation: "addAsset", asset });
   };
 
   const updateSettings: StudioActions["updateSettings"] = (patch, actor = "Você") => {
