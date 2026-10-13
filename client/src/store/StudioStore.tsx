@@ -43,8 +43,11 @@ type StudioActions = {
   approveScript: (ideaId: string) => void;
   requestScriptChanges: (ideaId: string) => void;
   startRender: (ideaId: string) => void;
+  cleanupRenderAsset: (jobId: string) => void;
+  uploadRenderInput: (params: { ideaId: string; fileName: string; contentType: "image/png" | "image/jpeg" | "image/webp"; base64: string }) => void;
   approveVideo: (videoId: string, options?: { overrideQa?: boolean }) => void;
   requestVideoChanges: (videoId: string) => void;
+  rejectVideo: (videoId: string) => void;
   scheduleVideo: (videoId: string) => void;
   retryVideo: (videoId: string) => void;
   publishVideo: (videoId: string) => void;
@@ -62,7 +65,7 @@ type StudioActions = {
   importDeviceData: () => void;
 };
 
-type StudioContextValue = StudioState & StudioActions & { isGeneratingScript: boolean };
+type StudioContextValue = StudioState & StudioActions & { isGeneratingScript: boolean; isUploadingRenderInput: boolean; isCleaningRenderAsset: boolean };
 const StudioContext = createContext<StudioContextValue | null>(null);
 const storageKey = "estudio-canal-ia-v1";
 
@@ -90,7 +93,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   const deviceSnapshot = useRef(state);
   const [hydrated, setHydrated] = useState(false);
   const [serverBacked, setServerBacked] = useState(false);
-  const stateQuery = trpc.studio.state.useQuery(undefined, { retry: 1, refetchOnWindowFocus: false });
+  const stateQuery = trpc.studio.state.useQuery(undefined, { retry: 1, refetchOnWindowFocus: false, refetchInterval: 15_000 });
   const saveState = trpc.studio.saveState.useMutation({
     onError: error => {
       if (isConflict(error)) {
@@ -119,12 +122,19 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   });
   const importState = trpc.studio.importState.useMutation({ onSuccess: data => { setState((data as StudioState) ?? deviceSnapshot.current); setServerBacked(true); toast.success("Dados deste aparelho importados para o Neon"); }, onError: error => toast.error("Importação indisponível", { description: `${error.message} Tente de novo.` }) });
   const publish = trpc.studio.publish.useMutation();
+  const uploadRenderInputRequest = trpc.studio.uploadRenderInput.useMutation({ onSuccess: data => { setState(data as StudioState); toast.success("Captura anexada ao roteiro aprovado"); }, onError: error => toast.error("Não foi possível anexar a captura", { description: error.message }) });
+  const cleanupRenderAssetRequest = trpc.studio.cleanupRenderAsset.useMutation({ onSuccess: data => { setState(data as StudioState); toast.success("Limpeza do arquivo solicitada", { description: "O download foi desativado; GitHub Actions removerá o draft Release e sua tag." }); }, onError: error => toast.error("Não foi possível limpar o arquivo", { description: error.message }) });
 
   useEffect(() => {
-    if (!stateQuery.isSuccess || hydrated) return;
-    if (stateQuery.data) { setState(stateQuery.data as StudioState); setServerBacked(true); }
-    setHydrated(true);
-  }, [stateQuery.isSuccess, stateQuery.data, hydrated]);
+    if (!stateQuery.isSuccess) return;
+    const remote = stateQuery.data as StudioState | null;
+    if (!hydrated) {
+      if (remote) { setState(remote); setServerBacked(true); }
+      setHydrated(true);
+      return;
+    }
+    if (remote && serverBacked && (remote.version ?? 0) > (state.version ?? 0)) setState(remote);
+  }, [stateQuery.isSuccess, stateQuery.data, hydrated, serverBacked, state.version]);
 
   useEffect(() => {
     if (!hydrated || !serverBacked) return;
@@ -169,8 +179,12 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   };
 
   const startRender: StudioActions["startRender"] = ideaId => {
-    editorialCommand.mutate({ operation: "startRender", ideaId });
+    editorialCommand.mutate({ operation: "startRender", ideaId }, { onSuccess: () => toast.success("Render real enviado", { description: "O job ficará visível nesta tela enquanto o GitHub Actions processa o vídeo." }) });
   };
+
+  const cleanupRenderAsset: StudioActions["cleanupRenderAsset"] = jobId => cleanupRenderAssetRequest.mutate({ jobId });
+
+  const uploadRenderInput: StudioActions["uploadRenderInput"] = params => uploadRenderInputRequest.mutate(params);
 
   const approveVideo: StudioActions["approveVideo"] = (videoId, options = {}) => {
     editorialCommand.mutate({ operation: "approveVideo", videoId, overrideQa: Boolean(options.overrideQa) });
@@ -178,6 +192,10 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
 
   const requestVideoChanges: StudioActions["requestVideoChanges"] = videoId => {
     editorialCommand.mutate({ operation: "requestVideoChanges", videoId });
+  };
+
+  const rejectVideo: StudioActions["rejectVideo"] = videoId => {
+    editorialCommand.mutate({ operation: "rejectVideo", videoId });
   };
 
   const scheduleVideo: StudioActions["scheduleVideo"] = videoId => {
@@ -271,10 +289,12 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<StudioContextValue>(() => ({
     ...state, createIdea, updateScript, generateScript, approveScript, requestScriptChanges,
     isGeneratingScript: generateScriptRequest.isPending,
-    startRender, approveVideo, requestVideoChanges, scheduleVideo, retryVideo, publishVideo, setDemoMode,
+    isUploadingRenderInput: uploadRenderInputRequest.isPending,
+    isCleaningRenderAsset: cleanupRenderAssetRequest.isPending,
+    startRender, cleanupRenderAsset, uploadRenderInput, approveVideo, requestVideoChanges, rejectVideo, scheduleVideo, retryVideo, publishVideo, setDemoMode,
     clearExampleData, addAsset, updateSettings,
     setAutomation, selectAdapter, requestPlatformConnection, addChat, applyAgentActions, addAudit, resetDemo, importDeviceData,
-  }), [state, generateScriptRequest.isPending]);
+  }), [state, generateScriptRequest.isPending, uploadRenderInputRequest.isPending, cleanupRenderAssetRequest.isPending]);
 
   return <StudioContext.Provider value={value}>{children}</StudioContext.Provider>;
 }

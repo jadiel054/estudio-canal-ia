@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canApproveScript, canApproveVideo, canEditScript, canPublishVideo, canSchedule, canStartRender } from "./workflowPolicy";
+import { canApproveScript, canApproveVideo, canEditScript, canPublishVideo, canRejectVideo, canSchedule, canStartRender } from "./workflowPolicy";
 
 describe("política editorial", () => {
   it("bloqueia render antes do Portão 1", () => {
@@ -21,6 +21,12 @@ describe("política editorial", () => {
   it("aceita apenas um roteiro no estado explícito do Portão 1", () => {
     expect(canApproveScript("roteiro", "Aguardando aprovação").allowed).toBe(false);
     expect(canApproveScript("aguarda_aprov_roteiro", "Aguardando aprovação").allowed).toBe(true);
+  });
+
+  it("permite rejeitar somente vídeos aguardando o Portão 2", () => {
+    expect(canRejectVideo("aguarda_aprov_video").allowed).toBe(true);
+    expect(canRejectVideo("render").allowed).toBe(false);
+    expect(canRejectVideo("agendado").allowed).toBe(false);
   });
 });
 

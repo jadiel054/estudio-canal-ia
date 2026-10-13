@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Check, ChevronDown, ChevronUp, CircleAlert, Loader2, RefreshCw, ShieldCheck, Wifi } from "lucide-react";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
+import { TTSProviderSettings } from "./TTSProviderSettings";
 
 const TASKS = [["roteiro", "Roteiro"], ["qa", "QA"], ["agente", "Nexo"], ["leve", "Tarefas leves"]] as const;
 const THINKING_LEVELS = ["minimal", "low", "medium", "high"] as const;
@@ -30,6 +31,7 @@ export function LLMProviderSettings() {
   if (settingsQuery.isError) return <div className="rounded-2xl border border-[#ff7b70]/20 bg-[#ff7b70]/[.06] p-5"><p className="flex items-center gap-2 text-sm font-bold text-[#ffaaa3]"><CircleAlert size={16} /> Configuração indisponível</p><p className="mt-2 text-xs text-[#d3a5a1]">Tente novamente para consultar o servidor.</p><button type="button" onClick={() => settingsQuery.refetch()} className="mt-3 inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-xs font-black text-white"><RefreshCw size={14} /> Tentar de novo</button></div>;
 
   return <div className="space-y-5">
+    <TTSProviderSettings />
     <section className="rounded-2xl border border-white/[.075] bg-[#111827]/72 p-4 shadow-[0_16px_50px_rgba(0,0,0,.12)] sm:p-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><p className="label">LLM · FALLBACK AUTOMÁTICO</p><h2 className="mt-1 text-lg font-black text-white">Provedores e prioridade</h2><p className="mt-2 max-w-2xl text-xs leading-5 text-[#95a2b8]">Gemini é o principal para roteiro e QA. Groq entra na ordem seguinte quando houver 429, timeout, erro 5xx ou falha de conexão. As chaves ficam somente no servidor.</p></div><ShieldCheck size={20} className="text-[#c6ff4d]" /></div>
       <div className="mt-4 space-y-3">{draft.map((provider, index) => <div key={provider.id} className="rounded-xl border border-white/[.07] bg-white/[.025] p-3">

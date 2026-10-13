@@ -5,12 +5,17 @@ import { createContext } from "./_core/context";
 import { publicPlatformScript } from "./_core/publicConfig";
 import { studioPersistenceStatus, verifyStudioDatabase } from "./studioRepository";
 import { timingSafeEqual } from "node:crypto";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { readSession } from "./auth";
 import { refreshRadar } from "./radar";
+import { RENDER_PATHS, verifyRenderRequestSignature } from "./renderSecurity";
+import { getRenderDownloadAsset, getSignedRenderInput, getSignedRenderManifest, processRenderCallback, synthesizeRenderCue } from "./renderPipeline";
 
 /** Registers all application API routes without starting a network listener. */
 export function registerApiRoutes(app: Express) {
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  app.use(express.json({ limit: "6mb", verify: (req, _res, buffer) => { if ((req as typeof req & { originalUrl?: string }).originalUrl?.startsWith("/api/render")) (req as typeof req & { rawBody?: Buffer }).rawBody = Buffer.from(buffer); } }));
+  app.use(express.urlencoded({ limit: "6mb", extended: true }));
   // Nenhuma resposta de API pode ser armazenada por browser, CDN ou service worker.
   // Isso inclui sessão, configuração, estado do Neon e respostas autenticadas do tRPC.
   app.use("/api", (_req, res, next) => {
@@ -65,6 +70,69 @@ export function registerApiRoutes(app: Express) {
 
   app.get("/api/platform/config.js", (_req, res) => {
     res.set("Cache-Control", "no-store").type("application/javascript").send(publicPlatformScript());
+  });
+
+  /** Endpoints privados chamados apenas pelo workflow autenticado via HMAC. */
+  app.post("/api/render", async (req, res) => {
+    const operation = typeof req.query.op === "string" ? req.query.op : "";
+    const signedPath = operation === "manifest" ? RENDER_PATHS.manifest : operation === "voice" ? RENDER_PATHS.voice : operation === "input" ? RENDER_PATHS.input : operation === "callback" ? RENDER_PATHS.callback : undefined;
+    if (!signedPath) return res.status(404).json({ error: "render_operation_not_found" });
+    const rawBody = (req as typeof req & { rawBody?: Buffer }).rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}), "utf8");
+    if (!verifyRenderRequestSignature(rawBody, req.get("x-render-signature"), process.env.STUDIO_RENDER_HMAC_SECRET, { method: "POST", path: signedPath })) return res.status(401).json({ error: "unauthorized" });
+    if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) return res.status(400).json({ error: "invalid_json_body" });
+    try {
+      if (operation === "manifest") {
+        if (typeof req.body.jobId !== "string" || !/^[0-9a-f-]{36}$/i.test(req.body.jobId)) return res.status(400).json({ error: "invalid_job_id" });
+        const result = await getSignedRenderManifest(req.body.jobId);
+        res.set("X-Render-Response-Signature", result.signature).type("application/json").send(result.body);
+        return;
+      }
+      if (operation === "voice") {
+        if (typeof req.body.jobId !== "string" || !/^[0-9a-f-]{36}$/i.test(req.body.jobId) || !Number.isInteger(req.body.cueIndex)) return res.status(400).json({ error: "invalid_voice_request" });
+        const result = await synthesizeRenderCue(req.body.jobId, req.body.cueIndex);
+        res.set("X-Render-Response-Signature", result.signature).set("X-Render-Model", result.model).set("X-Render-Voice", result.voice).set("X-Render-Fallback", String(result.fallback)).type("audio/wav").send(result.audio);
+        return;
+      }
+      if (operation === "input") {
+        if (typeof req.body.jobId !== "string" || !/^[0-9a-f-]{36}$/i.test(req.body.jobId) || typeof req.body.inputAssetId !== "string" || !/^[0-9a-f-]{36}$/i.test(req.body.inputAssetId)) return res.status(400).json({ error: "invalid_input_request" });
+        const result = await getSignedRenderInput(req.body.jobId, req.body.inputAssetId);
+        res.set("X-Render-Response-Signature", result.signature).set("X-Render-SHA256", result.sha256).set("X-Render-File-Name", result.fileName).type(result.contentType).send(result.data);
+        return;
+      }
+      const result = await processRenderCallback(req.body);
+      return res.json({ ok: true, ...result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message.slice(0, 350) : "Render operation failed.";
+      return res.status(400).json({ error: "render_operation_failed", message });
+    }
+  });
+
+  app.get("/api/render/download/:jobId", async (req, res) => {
+    if (!(await readSession(req))) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const asset = await getRenderDownloadAsset(req.params.jobId);
+      const token = process.env.GITHUB_ACTIONS_TOKEN;
+      if (!token) return res.status(503).json({ error: "render_download_not_configured" });
+      const headers = { authorization: `Bearer ${token}`, accept: "application/octet-stream", "x-github-api-version": "2022-11-28" };
+      const assetUrl = `https://api.github.com/repos/jadiel054/estudio-canal-ia/releases/assets/${asset.assetId}`;
+      const apiResponse = await fetch(assetUrl, { headers, redirect: "manual", signal: AbortSignal.timeout(12_000) });
+      let fileResponse = apiResponse;
+      if (apiResponse.status >= 300 && apiResponse.status < 400) {
+        const location = apiResponse.headers.get("location");
+        if (!location) return res.status(502).json({ error: "github_asset_redirect_missing" });
+        const range = req.get("range");
+        fileResponse = await fetch(location, { headers: range ? { range } : {}, signal: AbortSignal.timeout(50_000) });
+      }
+      if (!fileResponse.ok || !fileResponse.body) return res.status(fileResponse.status === 404 ? 404 : 502).json({ error: "github_asset_unavailable" });
+      res.status(fileResponse.status).set("Content-Type", "video/mp4").set("Accept-Ranges", "bytes").set("Cache-Control", "no-store, private");
+      res.set("Content-Disposition", `${req.query.download === "1" ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(asset.fileName)}`);
+      for (const header of ["content-length", "content-range"]) { const value = fileResponse.headers.get(header); if (value) res.set(header, value); }
+      await pipeline(Readable.fromWeb(fileResponse.body as any), res);
+    } catch (error) {
+      if (res.headersSent) return res.destroy(error instanceof Error ? error : undefined);
+      const message = error instanceof Error ? error.message.slice(0, 250) : "Falha ao abrir o MP4.";
+      return res.status(404).json({ error: "render_file_unavailable", message });
+    }
   });
 
   app.use(

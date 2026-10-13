@@ -8,9 +8,9 @@ export type GateResult = { allowed: true } | { allowed: false; reason: string };
 /**
  * Contexto de vídeo simulado.
  *
- * O render atual é SIMULADO: não existe FFmpeg nem arquivo final. Um vídeo
- * simulado nunca pode atravessar o Portão 2 nem entrar na agenda fora de um
- * modo "demonstração" explícito, ligado pelo dono nas Configurações.
+ * Um vídeo explicitamente simulado nunca pode atravessar o Portão 2 nem entrar
+ * na agenda fora de um modo "demonstração" explícito, ligado pelo dono nas
+ * Configurações. O pipeline real usa `simulated: false` e QA de arquivo.
  */
 export type SimulationContext = { simulated?: boolean; demoMode?: boolean };
 
@@ -100,4 +100,10 @@ export function canRequestVideoAdjustment(stage: EditorialStage): GateResult {
   return stage === "aguarda_aprov_video"
     ? { allowed: true }
     : { allowed: false, reason: "Ajustes de vídeo são solicitados durante o Portão 2." };
+}
+
+export function canRejectVideo(stage: EditorialStage): GateResult {
+  return stage === "aguarda_aprov_video"
+    ? { allowed: true }
+    : { allowed: false, reason: "Só é possível rejeitar um vídeo durante o Portão 2." };
 }

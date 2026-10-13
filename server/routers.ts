@@ -13,6 +13,8 @@ import { executeEditorialCommand, type EditorialCommand } from "./editorial";
 import { parseStudioState, StateTooLargeError } from "./studioStateSchema";
 import { getRadarState, refreshRadar } from "./radar";
 import { generateScriptForIdea } from "./scriptPipeline";
+import { generateSpeech, getTtsSettings, ttsSettingsSchema, updateTtsSettings } from "./ttsProvider";
+import { renderIntegrationStatus, requestRenderAssetCleanup, startRenderPipeline, uploadRenderInput } from "./renderPipeline";
 
 async function enforceLLMRateLimit(userId: string) { if (!(await consumeRateLimit(`llm:${userId}`, 20))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Limite de 20 chamadas LLM por minuto atingido. Tente novamente em instantes." }); }
 const taskSchema = z.enum(["roteiro", "qa", "agente", "leve"]);
@@ -34,6 +36,7 @@ const editorialCommandSchema = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("startRender"), ideaId: z.string().min(1).max(120) }),
   z.object({ operation: z.literal("approveVideo"), videoId: z.string().min(1).max(120), overrideQa: z.boolean() }),
   z.object({ operation: z.literal("requestVideoChanges"), videoId: z.string().min(1).max(120) }),
+  z.object({ operation: z.literal("rejectVideo"), videoId: z.string().min(1).max(120) }),
   z.object({ operation: z.literal("scheduleVideo"), videoId: z.string().min(1).max(120) }),
   z.object({ operation: z.literal("retryVideo"), videoId: z.string().min(1).max(120) }),
   z.object({ operation: z.literal("setDemoMode"), enabled: z.boolean() }),
@@ -84,6 +87,15 @@ export const appRouter = router({
     persistence: adminProcedure.query(() => studioPersistenceStatus()),
     verifyPersistence: adminProcedure.mutation(() => verifyStudioDatabase()),
     state: adminProcedure.query(() => getStudioState()),
+    renderIntegration: adminProcedure.query(() => renderIntegrationStatus()),
+    cleanupRenderAsset: adminProcedure.input(z.object({ jobId: z.string().uuid() })).mutation(async ({ input }) => {
+      try { return await requestRenderAssetCleanup(input.jobId); }
+      catch (error) { throw toTrpcError(error); }
+    }),
+    uploadRenderInput: adminProcedure.input(z.object({ ideaId: z.string().min(1).max(120), fileName: z.string().min(1).max(120), contentType: z.enum(["image/png", "image/jpeg", "image/webp"]), base64: z.string().min(1).max(2_800_000) })).mutation(async ({ input, ctx }) => {
+      try { return await uploadRenderInput(input, ctx.user.id); }
+      catch (error) { throw toTrpcError(error); }
+    }),
     radar: adminProcedure.query(async () => getRadarState()),
     refreshRadar: adminProcedure.mutation(async ({ ctx }) => {
       if (!(await consumeRateLimit(`radar-refresh:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "O Radar pode ser atualizado uma vez por minuto. Aguarde e tente novamente." });
@@ -97,6 +109,7 @@ export const appRouter = router({
     }),
     command: adminProcedure.input(editorialCommandSchema).mutation(async ({ input }) => {
       try {
+        if (input.operation === "startRender") return await startRenderPipeline(input.ideaId);
         // O ator vem do contexto autenticado, não de heurística sobre o texto da ação.
         return await executeEditorialCommand(input as EditorialCommand, { actor: "Você" });
       } catch (error) {
@@ -151,6 +164,16 @@ export const appRouter = router({
     updateSettings: adminProcedure.input(z.object({ gemini: providerPatchSchema, groq: providerPatchSchema })).mutation(({ input }) => updateProviderSettings(input as any)),
     testConnection: adminProcedure.input(z.object({ provider: z.enum(["gemini", "groq"]) })).mutation(({ input }) => testProvider(input.provider as LLMProviderId)),
     complete: adminProcedure.input(z.object({ task: taskSchema, messages: z.array(messageSchema).min(1).max(12), preferred: z.enum(["gemini", "groq"]).optional() }).superRefine((input, ctx) => { const total = input.messages.reduce((sum, item) => sum + item.content.length, 0); if (total > 60_000) ctx.addIssue({ code: "custom", message: "O total das mensagens excede 60.000 caracteres." }); })).mutation(async ({ input, ctx }) => { await enforceLLMRateLimit(ctx.user.id); return completeWithFallback(input.task as LLMTask, input.messages, input.preferred); }),
+  }),
+  tts: router({
+    settings: adminProcedure.query(async () => ({ ...await getTtsSettings(), configured: Boolean(process.env.STUDIO_LLM_GEMINI_KEY), dataPolicy: "O nível gratuito pode usar entradas e saídas para melhoria de produtos e revisão humana; não envie dados sensíveis." })),
+    updateSettings: adminProcedure.input(ttsSettingsSchema).mutation(async ({ input }) => updateTtsSettings(input)),
+    test: adminProcedure.mutation(async ({ ctx }) => {
+      if (!(await consumeRateLimit(`tts-test:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "A amostra de voz pode ser gerada uma vez por minuto." });
+      const settings = await getTtsSettings();
+      const result = await generateSpeech("Olá! Este é um teste de voz em português brasileiro para o Estúdio de Canal IA.", settings);
+      return { audioBase64: result.audio.toString("base64"), contentType: result.contentType, model: result.model, voice: result.voice, fallback: result.fallback, bytes: result.audio.length };
+    }),
   }),
 });
 export type AppRouter = typeof appRouter;

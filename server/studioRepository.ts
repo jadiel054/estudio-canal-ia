@@ -50,6 +50,9 @@ function getNeonPool() {
   return pool;
 }
 
+/** Pool compartilhado para repositórios especializados do Estúdio. */
+export function getStudioPool() { return getNeonPool(); }
+
 export function studioPersistenceStatus() {
   return {
     mode: process.env.STUDIO_DATABASE_URL ? "neon" : "local",
@@ -103,6 +106,25 @@ export async function saveLLMProviderSettings(value: { gemini: unknown; groq: un
   await client.query(
     "INSERT INTO app_settings (key, value, updated_at) VALUES ('llm_provider_settings', $1::jsonb, NOW()) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
     [JSON.stringify(value)]
+  );
+  return value;
+}
+
+export async function readStudioSetting<T = unknown>(key: string): Promise<T | null> {
+  const client = getNeonPool();
+  if (!client) return null;
+  try {
+    const result = await client.query<{ value: T }>("SELECT value FROM app_settings WHERE key = $1 LIMIT 1", [key]);
+    return result.rows[0]?.value ?? null;
+  } catch { return null; }
+}
+
+export async function writeStudioSetting(key: string, value: unknown) {
+  const client = getNeonPool();
+  if (!client) throw new Error("Neon não configurado para salvar a configuração do estúdio.");
+  await client.query(
+    "INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+    [key, JSON.stringify(value)],
   );
   return value;
 }

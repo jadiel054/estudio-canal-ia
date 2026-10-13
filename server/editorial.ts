@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { canApproveScript, canApproveVideo, canEditScript, canGenerateScript, canRequestVideoAdjustment, canSchedule, canStartRender } from "@shared/workflowPolicy";
+import { canApproveScript, canApproveVideo, canEditScript, canGenerateScript, canRejectVideo, canRequestVideoAdjustment, canSchedule, canStartRender } from "@shared/workflowPolicy";
 import { appendStudioAudit, getStudioState, saveStudioState, stateVersion } from "./studioRepository";
 
 export type EditorialActor = "Você" | "Nexo" | "Sistema";
@@ -13,6 +13,7 @@ export type EditorialCommand =
   | { operation: "startRender"; ideaId: string }
   | { operation: "approveVideo"; videoId: string; overrideQa: boolean }
   | { operation: "requestVideoChanges"; videoId: string }
+  | { operation: "rejectVideo"; videoId: string }
   | { operation: "scheduleVideo"; videoId: string }
   | { operation: "retryVideo"; videoId: string }
   | { operation: "setDemoMode"; enabled: boolean }
@@ -106,6 +107,7 @@ export async function executeEditorialCommand(command: EditorialCommand, context
     }
     case "approveVideo": {
       const video = state.videos?.find((item: any) => item.id === command.videoId); const idea = video && state.ideas?.find((item: any) => item.id === video.ideaId); const script = video && state.scripts?.find((item: any) => item.id === video.scriptId); if (!video || !idea || !script) fail("Vídeo, pauta ou roteiro não encontrado.");
+      if (!video.simulated && (!video.renderJobId || !video.assetId || !video.fileName || !video.qa.every((item: any) => item.verified === true && item.passed))) fail("O Portão 2 exige MP4 de render real e todos os checks verificáveis aprovados.");
       const simulation = { simulated: Boolean(video.simulated), demoMode: isDemoMode(state) };
       const hasWarning = video.qa.some((item: any) => !item.passed); if (hasWarning && !command.overrideQa) fail("Há alertas no QA; confirme a aprovação com ressalva."); const guard = canApproveVideo(video.stage, idea.status, script.status, video.qa.length > 0, simulation); if (!guard.allowed) fail(guard.reason);
       video.stage = "aprovado_para_agenda"; idea.status = "aprovado_para_agenda"; target = video.title;
@@ -114,6 +116,9 @@ export async function executeEditorialCommand(command: EditorialCommand, context
     }
     case "requestVideoChanges": {
       const video = state.videos?.find((item: any) => item.id === command.videoId); if (!video) fail("Vídeo não encontrado."); const guard = canRequestVideoAdjustment(video.stage); if (!guard.allowed) fail(guard.reason); video.stage = "ajuste_pedido"; const idea = state.ideas?.find((item: any) => item.id === video.ideaId); if (idea) idea.status = "assets"; target = video.title; audit(state, actor, "Ajuste de vídeo solicitado", target, "Retornou à etapa de assets"); break;
+    }
+    case "rejectVideo": {
+      const video = state.videos?.find((item: any) => item.id === command.videoId); if (!video) fail("Vídeo não encontrado."); const guard = canRejectVideo(video.stage); if (!guard.allowed) fail(guard.reason); video.stage = "rejeitado"; const idea = state.ideas?.find((item: any) => item.id === video.ideaId); if (idea) idea.status = "rejeitado"; target = video.title; audit(state, actor, "Vídeo rejeitado no Portão 2", target, "O vídeo não avançará para agenda ou publicação."); break;
     }
     case "scheduleVideo": {
       const video = state.videos?.find((item: any) => item.id === command.videoId); if (!video) fail("Vídeo não encontrado."); const guard = canSchedule(video.stage, { simulated: Boolean(video.simulated), demoMode: isDemoMode(state) }); if (!guard.allowed) fail(guard.reason); video.stage = "agendado"; video.scheduledFor = new Intl.DateTimeFormat("pt-BR", { dateStyle: "medium", timeStyle: "short" }).format(new Date(Date.now() + 172800000)); const idea = state.ideas?.find((item: any) => item.id === video.ideaId); if (idea) idea.status = "agendado"; target = video.title; audit(state, actor, "Publicação agendada", target, video.simulated ? "Slot reservado em modo demonstração (vídeo simulado)" : "Modo seguro: envio manual"); break;

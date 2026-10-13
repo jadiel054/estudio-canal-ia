@@ -1,0 +1,90 @@
+export type NarrationCue = { index: number; section: string; text: string };
+export type ScriptVisuals = { cues: NarrationCue[]; codeBlocks: string[]; sections: string[] };
+const MAX_CUE_CHARS = 180;
+const MAX_CUES = 80;
+
+function cleanLine(value: string) {
+  return value
+    .replace(/^\s*[-*+]\s+/, "")
+    .replace(/^\s*\d+[.)]\s+/, "")
+    .replace(/\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function splitSentences(paragraph: string): string[] {
+  const text = cleanLine(paragraph);
+  if (!text) return [];
+  const sentences = text.split(/(?<=[.!?])\s+(?=[\p{L}\p{N}"“])/u).filter(Boolean);
+  const result: string[] = [];
+  for (const sentence of sentences) {
+    if (sentence.length <= MAX_CUE_CHARS) { result.push(sentence); continue; }
+    let pending = "";
+    for (const word of sentence.split(/\s+/)) {
+      if (Array.from(word).length > MAX_CUE_CHARS) throw new Error("O roteiro contém uma palavra ou URL maior que o limite legível de legenda; divida ou remova-a antes do render.");
+      if (pending && `${pending} ${word}`.length > MAX_CUE_CHARS) { result.push(pending); pending = word; }
+      else pending = pending ? `${pending} ${word}` : word;
+    }
+    if (pending) result.push(pending);
+  }
+  return result;
+}
+
+/** Remove apenas marcação e instruções de bloco; não reescreve nem inventa falas. */
+export function extractScriptVisuals(content: string): ScriptVisuals {
+  if (typeof content !== "string" || !content.trim() || content.length > 100_000) throw new Error("Roteiro vazio ou maior que o limite aceito para render.");
+  const lines = content.replace(/\r\n?/g, "\n").split("\n");
+  const sections: Array<{ title: string; paragraphs: string[] }> = [];
+  const codeBlocks: string[] = [];
+  let current = { title: "Narração", paragraphs: [] as string[] };
+  let inCode = false;
+  let code: string[] = [];
+  let paragraph: string[] = [];
+  const flushParagraph = () => { const text = paragraph.join(" ").trim(); if (text) current.paragraphs.push(text); paragraph = []; };
+  const flushSection = () => { flushParagraph(); if (current.paragraphs.length) sections.push(current); };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^```/.test(trimmed) || /^~~~/.test(trimmed)) {
+      if (inCode) { const block = code.join("\n").trim(); if (block) codeBlocks.push(block.slice(0, 8_000)); code = []; }
+      else flushParagraph();
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) { code.push(line); continue; }
+    const heading = /^#{1,6}\s+(.+)$/.exec(trimmed);
+    if (heading) {
+      flushSection();
+      current = { title: cleanLine(heading[1]).slice(0, 100) || "Narração", paragraphs: [] };
+      continue;
+    }
+    if (!trimmed || /^[-*_]{3,}$/.test(trimmed)) { flushParagraph(); continue; }
+    if (/^>\s?/.test(trimmed)) { paragraph.push(trimmed.replace(/^>\s?/, "")); continue; }
+    paragraph.push(trimmed);
+  }
+  if (inCode && code.length) { const block = code.join("\n").trim(); if (block) codeBlocks.push(block.slice(0, 8_000)); }
+  flushSection();
+  if (!sections.length) throw new Error("O roteiro aprovado não contém texto de narração fora dos blocos de código.");
+
+  const cues: NarrationCue[] = [];
+  for (const section of sections) {
+    for (const paragraphText of section.paragraphs) {
+      for (const sentence of splitSentences(paragraphText)) {
+        if (sentence) cues.push({ index: cues.length, section: section.title, text: sentence });
+      }
+    }
+  }
+  if (!cues.length) throw new Error("O roteiro aprovado não contém texto de narração fora dos blocos de código.");
+  if (cues.length > MAX_CUES) throw new Error(`O roteiro excede o limite seguro de ${MAX_CUES} trechos de narração; divida-o em partes antes do render.`);
+  return { cues, codeBlocks: codeBlocks.slice(0, 12), sections: sections.map(section => section.title).slice(0, 30) };
+}
+
+export function formatSrtTimestamp(seconds: number): string {
+  const safe = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+  const totalMs = Math.round(safe * 1000);
+  const hours = Math.floor(totalMs / 3_600_000);
+  const minutes = Math.floor((totalMs % 3_600_000) / 60_000);
+  const secs = Math.floor((totalMs % 60_000) / 1000);
+  const ms = totalMs % 1000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")},${String(ms).padStart(3, "0")}`;
+}

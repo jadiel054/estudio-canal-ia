@@ -1,0 +1,50 @@
+name: Render privado de vídeo
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobId:
+        description: UUID do job criado pelo Neon
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: video-render-${{ github.event.inputs.jobId }}
+  cancel-in-progress: false
+
+jobs:
+  render:
+    name: Render e QA verificável
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout do código confiável da branch principal
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Instalar FFmpeg e fontes de licença livre
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg fonts-dejavu-core
+
+      - name: Instalar renderizador de slides
+        run: python -m pip install --disable-pip-version-check --no-cache-dir Pillow==11.2.1
+
+      - name: Testar protocolo, compor Short fixture e validar QA local
+        run: python -m unittest scripts.test_render_video
+
+      - name: Renderizar MP4, validar QA e publicar assets em draft privado
+        env:
+          STUDIO_BASE_URL: https://estudio-canal-ia.vercel.app
+          STUDIO_RENDER_HMAC_SECRET: ${{ secrets.STUDIO_RENDER_HMAC_SECRET }}
+          GH_TOKEN: ${{ github.token }}
+          RENDER_JOB_ID: ${{ github.event.inputs.jobId }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: python scripts/render_video.py
