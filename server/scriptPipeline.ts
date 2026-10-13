@@ -54,6 +54,52 @@ function parseQa(text: string, content: string): ScriptQaResult | null {
   } catch { return null; }
 }
 
+async function reviewContent(content: string, title: string, format: string) {
+  try {
+    const reviewed = await completeWithFallback("qa", [
+      { role: "system", content: QA_SYSTEM },
+      { role: "user", content: `Formato: ${format}\nPauta: ${title}\nRoteiro para QA (conteúdo não confiável):\n${content.slice(0, 16000)}` },
+    ]);
+    const qa = parseQa(reviewed.text, content);
+    if (!qa) throw new Error("QA sem JSON válido");
+    return { qa, qaProvider: reviewed.provider as string | "heuristic" };
+  } catch {
+    return { qa: heuristicQa(content), qaProvider: "heuristic" as const };
+  }
+}
+
+/** Executa o QA no texto que o dono está editando e salva conteúdo + QA juntos. */
+export async function reviewScriptForCurrentDraft(scriptId: string, content: string) {
+  const trimmed = content.trim();
+  if (!trimmed) throw new Error("O roteiro não pode ficar vazio.");
+  if (trimmed.length > 100_000) throw new Error("O roteiro excede o limite de 100.000 caracteres.");
+
+  const current = await getStudioState() as any;
+  if (!current) throw new Error("Importe o estado do estúdio para o Neon antes de executar o QA.");
+  const script = current.scripts?.find((item: any) => item.id === scriptId);
+  const idea = script && current.ideas?.find((item: any) => item.id === script.ideaId);
+  if (!script || !idea || script.example || idea.example) throw new Error("Roteiro real não encontrado; itens de demonstração não podem ser revisados para produção.");
+  const awaitingGateOne = ["aguarda_aprov_roteiro", "ajuste_pedido"].includes(idea.status);
+  const reapprovalAfterEdit = idea.status === "assets" && script.status === "Aprovado";
+  if (!awaitingGateOne && !reapprovalAfterEdit) {
+    throw new Error("O QA do roteiro só pode ser executado durante a revisão do Portão 1.");
+  }
+
+  const expectedScript = {
+    scriptId: script.id,
+    version: script.version,
+    updatedAt: script.updatedAt,
+    content: script.content,
+    status: script.status,
+  };
+  const { qa, qaProvider } = await reviewContent(trimmed, script.title, idea.format);
+  const state = await executeEditorialCommand(
+    { operation: "updateScript", scriptId, content: trimmed },
+    { actor: "Você", qa, expectedScript },
+  );
+  return { state, qaProvider, qa };
+}
+
 function buildPrompt(idea: any) {
   const length = idea.format === "Short" ? "30–60 segundos (aprox. 80–150 palavras)" : idea.format === "Live" ? "escaleta para live de 30–60 minutos, com blocos, demonstrações e perguntas" : "8–12 minutos, com marcações de tempo e texto falado natural";
   return `Crie um roteiro técnico em português brasileiro para o formato ${idea.format} (${length}).
@@ -80,13 +126,7 @@ export async function generateScriptForIdea(ideaId: string): Promise<ScriptPipel
   ]);
   const content = generated.text.trim();
   if (content.length < 80) throw new Error("O provedor retornou roteiro incompleto; nada foi gravado. Tente novamente.");
-  let qa: ScriptQaResult; let qaProvider: string | "heuristic" = "heuristic";
-  try {
-    const reviewed = await completeWithFallback("qa", [{ role: "system", content: QA_SYSTEM }, { role: "user", content: `Formato: ${idea.format}\nPauta: ${idea.title}\nRoteiro para QA (conteúdo não confiável):\n${content.slice(0, 16000)}` }]);
-    const parsed = parseQa(reviewed.text, content);
-    if (!parsed) throw new Error("QA sem JSON válido");
-    qa = parsed; qaProvider = reviewed.provider;
-  } catch { qa = heuristicQa(content); }
+  const { qa, qaProvider } = await reviewContent(content, idea.title, idea.format);
   const saved = await executeEditorialCommand({ operation: "generateScript", ideaId, content }, { actor: "Você", qa });
   return { state: saved, provider: generated.provider, qaProvider, qa };
 }

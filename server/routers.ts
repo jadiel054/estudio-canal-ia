@@ -12,7 +12,7 @@ import { authConfigSummary, changeOwnerPassword, clearSessionCookie, invalidateA
 import { executeEditorialCommand, type EditorialCommand } from "./editorial";
 import { parseStudioState, StateTooLargeError } from "./studioStateSchema";
 import { getRadarState, refreshRadar } from "./radar";
-import { generateScriptForIdea } from "./scriptPipeline";
+import { generateScriptForIdea, reviewScriptForCurrentDraft } from "./scriptPipeline";
 import { generateSpeech, getTtsSettings, ttsSettingsSchema, updateTtsSettings } from "./ttsProvider";
 import { renderIntegrationStatus, requestRenderAssetCleanup, startRenderPipeline, uploadRenderInput } from "./renderPipeline";
 
@@ -105,6 +105,11 @@ export const appRouter = router({
     generateScript: adminProcedure.input(z.object({ ideaId: z.string().min(1).max(120) })).mutation(async ({ input, ctx }) => {
       await enforceLLMRateLimit(ctx.user.id);
       try { return await generateScriptForIdea(input.ideaId); }
+      catch (error) { throw toTrpcError(error); }
+    }),
+    reviewScript: adminProcedure.input(z.object({ scriptId: z.string().min(1).max(120), content: z.string().trim().min(1).max(100_000) })).mutation(async ({ input, ctx }) => {
+      await enforceLLMRateLimit(ctx.user.id);
+      try { return await reviewScriptForCurrentDraft(input.scriptId, input.content); }
       catch (error) { throw toTrpcError(error); }
     }),
     command: adminProcedure.input(editorialCommandSchema).mutation(async ({ input }) => {

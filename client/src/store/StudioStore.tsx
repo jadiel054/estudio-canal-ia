@@ -39,6 +39,7 @@ export type StudioState = {
 type StudioActions = {
   createIdea: (params: Pick<Idea, "title" | "format"> & Partial<Pick<Idea, "trendId" | "origin" | "angle" | "sourceNotes" | "captureUrls">>) => Idea;
   updateScript: (id: string, content: string) => void;
+  reviewScript: (id: string, content: string) => void;
   generateScript: (ideaId: string) => void;
   approveScript: (ideaId: string) => void;
   requestScriptChanges: (ideaId: string) => void;
@@ -65,7 +66,7 @@ type StudioActions = {
   importDeviceData: () => void;
 };
 
-type StudioContextValue = StudioState & StudioActions & { isGeneratingScript: boolean; isUploadingRenderInput: boolean; isCleaningRenderAsset: boolean };
+type StudioContextValue = StudioState & StudioActions & { isGeneratingScript: boolean; isReviewingScript: boolean; isUploadingRenderInput: boolean; isCleaningRenderAsset: boolean };
 const StudioContext = createContext<StudioContextValue | null>(null);
 const storageKey = "estudio-canal-ia-v1";
 
@@ -120,6 +121,13 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     },
     onError: error => toast.error("Não foi possível gerar roteiro e QA", { description: `${error.message} Tente novamente.` }),
   });
+  const reviewScriptRequest = trpc.studio.reviewScript.useMutation({
+    onSuccess: data => {
+      setState(data.state as StudioState);
+      toast.success("QA executado sobre o texto atual", { description: data.qaProvider === "heuristic" ? "O provedor de QA não respondeu; foram aplicadas verificações locais limitadas. Revise manualmente." : `QA executado por ${data.qaProvider === "gemini" ? "Gemini" : "Groq"}. O Portão 1 continua dependendo da sua aprovação.` });
+    },
+    onError: error => toast.error("Não foi possível executar o QA", { description: `${error.message} Revise o texto e tente novamente.` }),
+  });
   const importState = trpc.studio.importState.useMutation({ onSuccess: data => { setState((data as StudioState) ?? deviceSnapshot.current); setServerBacked(true); toast.success("Dados deste aparelho importados para o Neon"); }, onError: error => toast.error("Importação indisponível", { description: `${error.message} Tente de novo.` }) });
   const publish = trpc.studio.publish.useMutation();
   const uploadRenderInputRequest = trpc.studio.uploadRenderInput.useMutation({ onSuccess: data => { setState(data as StudioState); toast.success("Captura anexada ao roteiro aprovado"); }, onError: error => toast.error("Não foi possível anexar a captura", { description: error.message }) });
@@ -160,6 +168,10 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
 
   const updateScript: StudioActions["updateScript"] = (id, content) => {
     editorialCommand.mutate({ operation: "updateScript", scriptId: id, content });
+  };
+
+  const reviewScript: StudioActions["reviewScript"] = (id, content) => {
+    reviewScriptRequest.mutate({ scriptId: id, content });
   };
 
   const generateScript: StudioActions["generateScript"] = ideaId => {
@@ -287,14 +299,15 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   const importDeviceData = () => importState.mutate(deviceSnapshot.current);
 
   const value = useMemo<StudioContextValue>(() => ({
-    ...state, createIdea, updateScript, generateScript, approveScript, requestScriptChanges,
+    ...state, createIdea, updateScript, reviewScript, generateScript, approveScript, requestScriptChanges,
     isGeneratingScript: generateScriptRequest.isPending,
+    isReviewingScript: reviewScriptRequest.isPending,
     isUploadingRenderInput: uploadRenderInputRequest.isPending,
     isCleaningRenderAsset: cleanupRenderAssetRequest.isPending,
     startRender, cleanupRenderAsset, uploadRenderInput, approveVideo, requestVideoChanges, rejectVideo, scheduleVideo, retryVideo, publishVideo, setDemoMode,
     clearExampleData, addAsset, updateSettings,
     setAutomation, selectAdapter, requestPlatformConnection, addChat, applyAgentActions, addAudit, resetDemo, importDeviceData,
-  }), [state, generateScriptRequest.isPending, uploadRenderInputRequest.isPending, cleanupRenderAssetRequest.isPending]);
+  }), [state, generateScriptRequest.isPending, reviewScriptRequest.isPending, uploadRenderInputRequest.isPending, cleanupRenderAssetRequest.isPending]);
 
   return <StudioContext.Provider value={value}>{children}</StudioContext.Provider>;
 }
