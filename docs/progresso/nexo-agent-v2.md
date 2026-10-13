@@ -32,6 +32,7 @@
 - Vercel tem um deployment `READY` de produção para o commit `1056d42`.
 - Os nomes `GITHUB_ACTIONS_TOKEN` e `STUDIO_RENDER_HMAC_SECRET` aparecem configurados como variáveis de produção no projeto Vercel, mas os valores não foram lidos.
 - GitHub Actions lista os dois workflows (`Render privado de vídeo` e `Limpar render publicado`) ativos; não há execuções anteriores dos workflows de render/limpeza.
+- A consulta somente aos nomes dos secrets GitHub Actions foi recusada com HTTP 403 nesta sessão; a existência e o preenchimento do token/HMAC no repositório GitHub não puderam ser verificados.
 - O painel do Estúdio é privado. A sessão de desenvolvimento mostrou apenas o login; é preciso autenticação do dono para ler o status de Neon/token/HMAC no painel.
 - Nenhum render real foi disparado nesta tarefa. A primeira prova permanece reservada à pauta segura, Portão 1 aprovado, amostra de voz validada se houver TTS e confirmação explícita antes do clique que consome Actions/cria Release draft.
 
