@@ -21,6 +21,7 @@ A tarefa `leve` dos provedores configurados no próprio Estúdio classifica ader
 - O botão **Atualizar agora** chama a rota tRPC autenticada do proprietário, com limite de uma atualização manual por minuto.
 - O Vercel Cron está configurado para **todos os dias às 08:00 UTC (05:00 no horário de Brasília)**. O plano Hobby permite uma execução diária, mas pode iniciá-la em qualquer momento dentro da hora agendada.
 - O endpoint `/api/cron/radar` exige o `CRON_SECRET` sensível que foi cadastrado somente no ambiente de produção. O token não está no repositório. A rotina não publica conteúdo nem altera a política de aprovação.
+- Como o catch-all de API existente não atende URLs com dois segmentos, `api/cron/radar.js` encaminha explicitamente o caminho do Cron ao mesmo app Express e reaproveita a mesma checagem de segredo.
 - Falhas por fonte são registradas e as outras fontes continuam. Sem qualquer fonte bem-sucedida, a execução registra a falha e responde com erro, sem apagar coletas anteriores.
 
 ## Pautas, roteiro e Portão 1
