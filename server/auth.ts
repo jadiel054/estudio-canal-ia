@@ -37,5 +37,12 @@ export async function loginOwner(email: string, password: string, req: Request, 
 }
 export async function changeOwnerPassword(currentPassword: string, newPassword: string) { const current = (await getStoredOwnerPasswordHash()) ?? process.env.STUDIO_OWNER_PASSWORD_HASH ?? DUMMY_PASSWORD_HASH; if (!(await verifyPasswordAgainstHash(currentPassword, current))) return false; const hash = await hashOwnerPassword(newPassword); await setStoredOwnerPasswordHash(hash); await bumpCredentialVersion(); return true; }
 export async function invalidateAllSessions() { await bumpCredentialVersion(); }
-export const authConfigSummary = () => ({ configured: isOwnerConfigured(), email: ownerEmail() || null, method: "email + senha" as const, session: "cookie httpOnly Secure SameSite=Lax" as const });
+/**
+ * Resumo público da configuração de login.
+ *
+ * A rota `auth.config` é pública e NÃO deve revelar o e-mail do dono: expor o
+ * endereço exato da conta em uma rota aberta facilita ataques direcionados de
+ * força bruta e phishing. A tela de login usa apenas `configured`.
+ */
+export const authConfigSummary = () => ({ configured: isOwnerConfigured(), method: "email + senha" as const, session: "cookie httpOnly Secure SameSite=Lax" as const });
 void isProduction;

@@ -148,6 +148,12 @@ Nenhum valor de segredo foi adicionado ao código, a logs ou a respostas. As
 mensagens de erro usam apenas códigos HTTP e rótulos; o corpo das respostas dos
 provedores não é registrado.
 
+Além disso, a rota **pública** `auth.config` devolvia o e-mail do dono junto de
+`configured: true`. Expor o endereço exato da conta em uma rota aberta facilita
+força bruta direcionada e phishing, então o campo foi removido — a tela de login
+só usa `configured`. Verificado em produção: a resposta agora é
+`{"configured":true,"method":"email + senha","session":"cookie httpOnly Secure SameSite=Lax"}`.
+
 ## O que ainda depende do operador
 
 **O estado editorial nunca foi importado para o Neon** — a tabela `app_settings`

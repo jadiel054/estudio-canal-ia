@@ -39,11 +39,17 @@ describe("cache policy", () => {
 
     const firstConfig = await fetch(`${base}/api/trpc/auth.config${trpcInput}`);
     expect(firstConfig.headers.get("cache-control")).toContain("no-store");
-    expect(await firstConfig.text()).toContain("first@example.com");
+    const firstBody = await firstConfig.text();
+    expect(firstBody).toContain('"configured":true');
+    // A rota é pública: o e-mail do dono nunca pode aparecer na resposta.
+    expect(firstBody).not.toContain("first@example.com");
 
-    process.env.STUDIO_OWNER_EMAIL = "second@example.com";
+    // Prova de que a resposta é recalculada a cada requisição (não vem de cache):
+    // sem o segredo de sessão, a configuração deixa de estar pronta.
+    delete process.env.STUDIO_SESSION_SECRET;
     const secondConfig = await fetch(`${base}/api/trpc/auth.config${trpcInput}`);
-    expect(await secondConfig.text()).toContain("second@example.com");
+    expect(await secondConfig.text()).toContain('"configured":false');
+    process.env.STUDIO_SESSION_SECRET = "test-session-secret-with-at-least-32-chars";
 
     const me = await fetch(`${base}/api/trpc/auth.me${trpcInput}`);
     expect(me.headers.get("cache-control")).toContain("no-store");
