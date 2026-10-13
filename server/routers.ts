@@ -13,7 +13,7 @@ import { executeEditorialCommand, type EditorialCommand } from "./editorial";
 import { parseStudioState, StateTooLargeError } from "./studioStateSchema";
 import { getRadarState, refreshRadar } from "./radar";
 import { generateScriptForIdea, reviewScriptForCurrentDraft } from "./scriptPipeline";
-import { generateSpeech, getTtsSettings, ttsSettingsSchema, updateTtsSettings } from "./ttsProvider";
+import { generateSpeech, getTtsSettings, testTtsConnection, ttsSettingsSchema, updateTtsSettings } from "./ttsProvider";
 import { renderIntegrationStatus, requestRenderAssetCleanup, startRenderPipeline, uploadRenderInput } from "./renderPipeline";
 
 async function enforceLLMRateLimit(userId: string) { if (!(await consumeRateLimit(`llm:${userId}`, 20))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Limite de 20 chamadas LLM por minuto atingido. Tente novamente em instantes." }); }
@@ -173,6 +173,10 @@ export const appRouter = router({
   tts: router({
     settings: adminProcedure.query(async () => ({ ...await getTtsSettings(), configured: Boolean(process.env.STUDIO_LLM_GEMINI_KEY), dataPolicy: "O nível gratuito pode usar entradas e saídas para melhoria de produtos e revisão humana; não envie dados sensíveis." })),
     updateSettings: adminProcedure.input(ttsSettingsSchema).mutation(async ({ input }) => updateTtsSettings(input)),
+    testConnection: adminProcedure.mutation(async ({ ctx }) => {
+      if (!(await consumeRateLimit(`tts-connection:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "O teste de conexão TTS pode ser executado uma vez por minuto." });
+      return testTtsConnection(await getTtsSettings());
+    }),
     test: adminProcedure.mutation(async ({ ctx }) => {
       if (!(await consumeRateLimit(`tts-test:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "A amostra de voz pode ser gerada uma vez por minuto." });
       const settings = await getTtsSettings();

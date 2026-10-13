@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_TTS_SETTINGS, generateSpeech, TTS_MODELS } from "./ttsProvider";
+import { DEFAULT_TTS_SETTINGS, generateSpeech, testTtsConnection, TTS_MODELS } from "./ttsProvider";
 
-function sampleWav() {
+function sampleWav(sampleRate = 24_000) {
   const wav = Buffer.alloc(256);
   wav.write("RIFF", 0, "ascii");
   wav.writeUInt32LE(wav.length - 8, 4);
@@ -10,8 +10,8 @@ function sampleWav() {
   wav.writeUInt32LE(16, 16);
   wav.writeUInt16LE(1, 20);
   wav.writeUInt16LE(1, 22);
-  wav.writeUInt32LE(24_000, 24);
-  wav.writeUInt32LE(48_000, 28);
+  wav.writeUInt32LE(sampleRate, 24);
+  wav.writeUInt32LE(sampleRate * 2, 28);
   wav.writeUInt16LE(2, 32);
   wav.writeUInt16LE(16, 34);
   wav.write("data", 36, "ascii");
@@ -19,8 +19,22 @@ function sampleWav() {
   return wav;
 }
 
+function responseFromBody(body: unknown, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => JSON.stringify(body),
+  } as Response;
+}
+
 function okResponse(audio = sampleWav()) {
-  return { ok: true, status: 200, json: async () => ({ output_audio: { data: audio.toString("base64"), mime_type: "audio/wav" } }) } as Response;
+  return responseFromBody({
+    id: "interaction-test",
+    steps: [{
+      type: "model_output",
+      content: [{ type: "audio", mime_type: "audio/wav", data: audio.toString("base64") }],
+    }],
+  });
 }
 
 afterEach(() => {
@@ -30,7 +44,7 @@ afterEach(() => {
 });
 
 describe("Gemini TTS adapter", () => {
-  it("calls the supported Interactions endpoint and returns valid WAV from the primary model", async () => {
+  it("calls the supported Interactions endpoint and extracts WAV from the raw REST steps", async () => {
     vi.stubEnv("STUDIO_LLM_GEMINI_KEY", "unit-test-key");
     const fetchMock = vi.fn(async () => okResponse());
     vi.stubGlobal("fetch", fetchMock);
@@ -41,17 +55,22 @@ describe("Gemini TTS adapter", () => {
     expect(result.model).toBe(DEFAULT_TTS_SETTINGS.primaryModel);
     expect(result.fallback).toBe(false);
     expect(result.audio.subarray(0, 4).toString("ascii")).toBe("RIFF");
+    expect(result.audio.readUInt32LE(24)).toBe(24_000);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("https://generativelanguage.googleapis.com/v1beta/interactions");
-    expect(JSON.parse(String(init.body)).model).toBe(TTS_MODELS[0]);
+    const body = JSON.parse(String(init.body)) as Record<string, any>;
+    expect(body.model).toBe(TTS_MODELS[0]);
+    expect(body.response_format).toEqual({ type: "audio", mime_type: "audio/wav", sample_rate: 24_000 });
+    expect(body.generation_config.speech_config).toEqual([{ voice: "Kore" }]);
+    expect(body.store).toBe(false);
     expect((init.headers as Record<string, string>)["x-goog-api-key"]).toBe("unit-test-key");
   });
 
   it("uses the configured fallback after primary failure", async () => {
     vi.stubEnv("STUDIO_LLM_GEMINI_KEY", "unit-test-key");
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "unused body" } as Response)
+      .mockResolvedValueOnce(responseFromBody({ error: { status: "UNAVAILABLE" } }, 503))
       .mockResolvedValueOnce(okResponse());
     vi.stubGlobal("fetch", fetchMock);
 
@@ -62,13 +81,51 @@ describe("Gemini TTS adapter", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("fails closed when the key is missing or the output is not a RIFF WAV", async () => {
+  it("logs only HTTP status and a sanitized structural summary when audio is missing", async () => {
+    vi.stubEnv("STUDIO_LLM_GEMINI_KEY", "unit-test-key");
+    const secretLikeAudio = "A".repeat(240);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn(async () => responseFromBody({
+      steps: [{ type: "model_output", content: [{ type: "text" }] }],
+      metadata: secretLikeAudio,
+      prompt: "não deve aparecer no log",
+    })));
+
     await expect(generateSpeech("Olá.")).rejects.toThrow("principal e fallback falharam");
 
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn.mock.calls[0]).toEqual([
+      "[Gemini TTS] Resposta sem áudio",
+      expect.objectContaining({ status: 200, summary: expect.stringContaining('"steps"') }),
+    ]);
+    expect(String(warn.mock.calls[0][1])).not.toContain(secretLikeAudio);
+    expect(String(warn.mock.calls[0][1])).not.toContain("não deve aparecer no log");
+  });
+
+  it("rejects a WAV with a sample rate other than 24 kHz", async () => {
     vi.stubEnv("STUDIO_LLM_GEMINI_KEY", "unit-test-key");
-    const notWav = Buffer.alloc(256, 0x61);
-    vi.stubGlobal("fetch", vi.fn(async () => okResponse(notWav)));
-    await expect(generateSpeech("Olá.")).rejects.toThrow("WAV válido");
+    vi.stubGlobal("fetch", vi.fn(async () => okResponse(sampleWav(16_000))));
+
+    await expect(generateSpeech("Olá."))
+      .rejects.toThrow("WAV válido a 24 kHz");
+  });
+
+  it("distinguishes a rejected key from a TTS service that is unavailable", async () => {
+    vi.stubEnv("STUDIO_LLM_GEMINI_KEY", "unit-test-key");
+    vi.stubGlobal("fetch", vi.fn(async () => responseFromBody({ error: { code: 403, status: "PERMISSION_DENIED", message: "redacted" } }, 403)));
+
+    await expect(testTtsConnection()).resolves.toMatchObject({ ok: false, status: "invalid_key" });
+
+    vi.stubGlobal("fetch", vi.fn(async () => responseFromBody({ steps: [{ type: "model_output", content: [{ type: "text" }] }] })));
+    await expect(testTtsConnection()).resolves.toMatchObject({ ok: false, status: "tts_unavailable" });
+  });
+
+  it("returns not_configured without a network request when the key is missing", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(testTtsConnection()).resolves.toMatchObject({ ok: false, status: "not_configured" });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("rejects empty or oversized cue before a network request", async () => {
