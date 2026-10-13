@@ -122,6 +122,9 @@ export type RenderJob = ExampleFlag & {
   finishedAt?: string;
   error?: string;
   errorCode?: string;
+  errorOperation?: string;
+  httpStatus?: number;
+  upstreamStatus?: number;
   simulated?: boolean;
   workflowRunId?: number;
   releaseId?: number;

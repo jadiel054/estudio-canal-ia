@@ -28,8 +28,40 @@ GH_API = "https://api.github.com/repos/jadiel054/estudio-canal-ia"
 WORK = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / f"studio-render-{JOB_ID}"
 MAX_OUTPUT_BYTES = 1_900_000_000
 
+RENDER_OPERATIONS = {"manifest", "voice", "input", "callback", "render", "qa", "release", "dispatch", "worker", "unknown"}
+SAFE_RENDER_ERROR_CODES = {
+    "render_unauthorized", "render_operation_not_found", "invalid_json_body", "invalid_job_id",
+    "invalid_voice_request", "invalid_input_request", "tts_invalid_key", "tts_unavailable",
+    "tts_invalid_audio", "tts_network", "tts_timeout", "manifest_operation_failed",
+    "voice_operation_failed", "input_operation_failed", "callback_operation_failed", "render_failed",
+    "qa_failed", "release_failed", "dispatch_failed", "worker_unexpected", "render_network_error",
+    "ffmpeg_failed",
+    "invalid_response_signature", "invalid_tts_wav", "invalid_tts_duration", "manifest_invalid",
+    "callback_not_confirmed", "github_api_failed", "github_upload_failed", "render_http_error",
+}
+
+def operation_from_path(path: str) -> str:
+    operation = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("op", ["unknown"])[0]
+    return operation if operation in RENDER_OPERATIONS else "unknown"
+
+def safe_error_code(headers) -> str:
+    candidate = headers.get("X-Render-Error-Code") if headers else None
+    return candidate if candidate in SAFE_RENDER_ERROR_CODES else "render_http_error"
+
+def safe_http_status(value) -> int | None:
+    try:
+        status = int(value)
+    except (TypeError, ValueError):
+        return None
+    return status if 100 <= status <= 599 else None
+
 class RenderError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, operation: str = "worker", error_code: str = "render_failed", http_status: int | None = None, upstream_status: int | None = None):
+        super().__init__(message)
+        self.operation = operation if operation in RENDER_OPERATIONS else "worker"
+        self.error_code = error_code if error_code in SAFE_RENDER_ERROR_CODES else "render_failed"
+        self.http_status = safe_http_status(http_status)
+        self.upstream_status = safe_http_status(upstream_status)
 
 def compact_json(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -54,6 +86,7 @@ def verify_body(body: bytes, signature: str | None, path: str) -> bool:
     return hmac.compare_digest(expected, match.group(2))
 
 def post_studio(path: str, body: bytes, *, response_type: str = "json", verify_signature: bool = False):
+    operation = operation_from_path(path)
     request = urllib.request.Request(
         BASE_URL + path,
         data=body,
@@ -65,19 +98,22 @@ def post_studio(path: str, body: bytes, *, response_type: str = "json", verify_s
             data = response.read()
             signature = response.headers.get("X-Render-Response-Signature")
             if (response_type != "json" or verify_signature) and not verify_body(data, signature, path):
-                raise RenderError("A assinatura HMAC da resposta do Estúdio é inválida.")
+                raise RenderError("A assinatura HMAC da resposta do Estúdio é inválida.", operation=operation, error_code="invalid_response_signature")
             if response_type == "json":
-                return json.loads(data.decode("utf-8")), response.headers
+                try:
+                    return json.loads(data.decode("utf-8")), response.headers
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    raise RenderError("Resposta JSON inválida do Estúdio.", operation=operation, error_code="render_http_error") from None
             return data, response.headers
     except urllib.error.HTTPError as exc:
-        # Não imprimir body: pode conter texto editorial do dono.
-        raise RenderError(f"Endpoint interno do Estúdio recusou a operação (HTTP {exc.code}).") from None
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise RenderError("Falha de rede ao conectar ao endpoint interno do Estúdio.") from None
+        # Não ler/imprimir o body: a resposta pode conter texto editorial ou dados sensíveis.
+        raise RenderError("Endpoint interno do Estúdio recusou a operação.", operation=operation, error_code=safe_error_code(exc.headers), http_status=exc.code, upstream_status=safe_http_status(exc.headers.get("X-Render-Upstream-Status") if exc.headers else None)) from None
+    except (urllib.error.URLError, TimeoutError):
+        raise RenderError("Falha de rede ao conectar ao endpoint interno do Estúdio.", operation=operation, error_code="render_network_error") from None
 
 def gh_request(method: str, url: str, body: bytes | None = None, content_type: str = "application/vnd.github+json"):
     if not GH_TOKEN:
-        raise RenderError("GITHUB_TOKEN de execução ausente.")
+        raise RenderError("Credencial de execução ausente.", operation="release", error_code="github_api_failed")
     request = urllib.request.Request(url, data=body, method=method, headers={
         "authorization": f"Bearer {GH_TOKEN}",
         "accept": "application/vnd.github+json",
@@ -88,29 +124,31 @@ def gh_request(method: str, url: str, body: bytes | None = None, content_type: s
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             data = response.read()
-            if not data:
-                return None
+        if not data:
+            return None
+        try:
             return json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise RenderError("GitHub retornou resposta inválida na etapa de Release.", operation="release", error_code="github_api_failed") from None
     except urllib.error.HTTPError as exc:
-        raise RenderError(f"GitHub API recusou a etapa de Release (HTTP {exc.code}).") from None
+        raise RenderError("GitHub API recusou a etapa de Release.", operation="release", error_code="github_api_failed", http_status=exc.code) from None
     except (urllib.error.URLError, TimeoutError):
-        raise RenderError("Falha de rede ao falar com GitHub Releases.") from None
+        raise RenderError("Falha de rede ao falar com GitHub Releases.", operation="release", error_code="github_api_failed") from None
 
 def run(command: list[str], label: str):
     try:
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=900)
     except subprocess.TimeoutExpired as exc:
-        raise RenderError(f"Tempo limite excedido ao {label}.") from exc
+        raise RenderError("Tempo limite excedido durante uma etapa do FFmpeg.", operation="render", error_code="ffmpeg_failed") from exc
     except subprocess.CalledProcessError as exc:
-        tail = (exc.stderr or "").strip().splitlines()[-1:] or ["erro do FFmpeg"]
-        raise RenderError(f"Falha ao {label}: {tail[0][:180]}") from None
+        raise RenderError("Falha durante uma etapa do FFmpeg.", operation="render", error_code="ffmpeg_failed") from None
 
 def ffprobe(path: Path) -> dict:
     try:
         result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration,size", "-show_entries", "stream=codec_type,codec_name,width,height,sample_rate,channels", "-of", "json", str(path)], check=True, capture_output=True, text=True, timeout=20)
         return json.loads(result.stdout)
-    except Exception as exc:
-        raise RenderError("Não foi possível inspecionar o MP4 final com ffprobe.") from exc
+    except Exception:
+        raise RenderError("Não foi possível inspecionar o MP4 final.", operation="qa", error_code="qa_failed") from None
 
 def font(path: str, size: int):
     try:
@@ -143,13 +181,13 @@ def load_capture(data: bytes, content_type: str) -> Image.Image:
     try:
         image = Image.open(io.BytesIO(data))
         if image.format not in {"PNG", "JPEG", "WEBP"}:
-            raise RenderError("Formato de captura inválido.")
+            raise RenderError("Formato de captura inválido.", operation="input", error_code="input_operation_failed")
         image.load()
         return ImageOps.exif_transpose(image).convert("RGB")
     except RenderError:
         raise
-    except Exception as exc:
-        raise RenderError("Não foi possível ler uma captura enviada.") from exc
+    except Exception:
+        raise RenderError("Não foi possível ler uma captura enviada.", operation="input", error_code="input_operation_failed") from None
 
 def make_slide(path: Path, manifest: dict, cue: dict, index: int, dims: tuple[int, int], capture: Image.Image | None):
     width, height = dims
@@ -207,16 +245,24 @@ def build_srt(entries: list[tuple[float, float, str]], path: Path):
         blocks.append(f"{number}\n{srt_time(start)} --> {srt_time(max(start+0.25, end))}\n{text.replace(chr(10), ' ').strip()}\n")
     path.write_text("\n".join(blocks), encoding="utf-8")
 
-def callback(manifest: dict, status: str, progress: int, *, message: str | None = None, result: dict | None = None):
+def callback(manifest: dict, status: str, progress: int, *, message: str | None = None, result: dict | None = None, diagnostic: RenderError | None = None):
     payload = {"eventId": str(uuid.uuid4()), "jobId": manifest["jobId"], "workflowRunId": RUN_ID, "status": status, "progress": progress}
-    if message:
+    if message and status != "failed":
         payload["message"] = message[:350]
+    if diagnostic:
+        if status != "failed":
+            raise RenderError("Diagnóstico só pode ser enviado em callback de falha.", operation="callback", error_code="callback_operation_failed")
+        payload.update({"errorOperation": diagnostic.operation, "errorCode": diagnostic.error_code})
+        if diagnostic.http_status is not None:
+            payload["httpStatus"] = diagnostic.http_status
+        if diagnostic.upstream_status is not None:
+            payload["upstreamStatus"] = diagnostic.upstream_status
     if result:
         payload.update(result)
     body = compact_json(payload)
     response, _ = post_studio("/api/render?op=callback", body)
     if not response.get("ok"):
-        raise RenderError("O Estúdio não confirmou o callback do job.")
+        raise RenderError("O Estúdio não confirmou o callback do job.", operation="callback", error_code="callback_not_confirmed")
     return response
 
 def fetch_manifest() -> dict:
@@ -224,19 +270,22 @@ def fetch_manifest() -> dict:
     response, _ = post_studio("/api/render?op=manifest", body, verify_signature=True)
     manifest = response
     if manifest.get("jobId") != JOB_ID or not manifest.get("cues") or len(manifest["cues"]) > 80:
-        raise RenderError("O manifesto não corresponde ao job ou não contém cues válidos.")
+        raise RenderError("O manifesto não corresponde ao job ou não contém cues válidos.", operation="manifest", error_code="manifest_invalid")
     return manifest
 
 def fetch_voice(job_id: str, cue_index: int, output: Path) -> float:
     body = compact_json({"jobId": job_id, "cueIndex": cue_index})
     audio, headers = post_studio("/api/render?op=voice", body, response_type="binary")
     if len(audio) < 64 or audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
-        raise RenderError("O adaptador TTS não retornou WAV válido.")
+        raise RenderError("O adaptador TTS não retornou WAV válido.", operation="voice", error_code="invalid_tts_wav")
     output.write_bytes(audio)
-    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(output)], check=True, capture_output=True, text=True, timeout=20)
-    duration = float(result.stdout.strip())
+    try:
+        result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(output)], check=True, capture_output=True, text=True, timeout=20)
+        duration = float(result.stdout.strip())
+    except Exception:
+        raise RenderError("Não foi possível validar o WAV do provedor.", operation="voice", error_code="invalid_tts_wav") from None
     if not 0.2 <= duration <= 120:
-        raise RenderError("Duração de um trecho TTS fora do limite seguro.")
+        raise RenderError("Duração de um trecho TTS fora do limite seguro.", operation="voice", error_code="invalid_tts_duration")
     return duration
 
 def fetch_inputs(manifest: dict, directory: Path) -> list[Image.Image]:
@@ -248,7 +297,7 @@ def fetch_inputs(manifest: dict, directory: Path) -> list[Image.Image]:
         data, headers = post_studio("/api/render?op=input", body, response_type="binary")
         digest = hashlib.sha256(data).hexdigest()
         if not hmac.compare_digest(digest, item["sha256"]) or len(data) != int(item["sizeBytes"]):
-            raise RenderError("A captura transferida não corresponde ao hash e ao tamanho do manifesto.")
+            raise RenderError("A captura transferida não corresponde ao manifesto.", operation="input", error_code="input_operation_failed")
         path = directory / f"capture-{len(images):02d}.img"
         path.write_bytes(data)
         image = load_capture(data, item["contentType"])
@@ -349,15 +398,15 @@ def create_release_and_upload(video: Path, captions: Path, manifest: dict) -> tu
     tag = f"studio-render-{manifest['jobId']}"
     release = gh_request("POST", GH_API + "/releases", compact_json({"tag_name": tag, "name": f"Render privado · {manifest['title'][:100]}", "body": "Asset temporário do Estúdio. Release em rascunho; não publicado.", "draft": True, "prerelease": True, "generate_release_notes": False}))
     if not release or not release.get("id"):
-        raise RenderError("GitHub não criou um draft Release para o MP4.")
+        raise RenderError("GitHub não confirmou o draft Release.", operation="release", error_code="github_api_failed")
     upload_base = str(release.get("upload_url", "")).split("{", 1)[0]
     if not upload_base:
-        raise RenderError("GitHub Release não forneceu URL de upload.")
+        raise RenderError("GitHub Release não forneceu URL de upload.", operation="release", error_code="github_api_failed")
     video_asset = upload_release_asset(upload_base + "?name=" + urllib.parse.quote(video.name), video, "video/mp4")
     # O SRT acompanha o MP4 para edição posterior; o app usa o asset de vídeo principal.
     upload_release_asset(upload_base + "?name=" + urllib.parse.quote(f"{manifest['jobId']}.srt"), captions, "text/plain")
     if not video_asset or not video_asset.get("id"):
-        raise RenderError("O draft Release não confirmou o asset MP4.")
+        raise RenderError("O draft Release não confirmou o asset MP4.", operation="release", error_code="github_api_failed")
     return int(release["id"]), int(video_asset["id"])
 
 def upload_release_asset(url: str, path: Path, content_type: str) -> dict:
@@ -377,18 +426,20 @@ def upload_release_asset(url: str, path: Path, content_type: str) -> dict:
             while chunk := file.read(8 * 1024 * 1024):
                 connection.send(chunk)
         response = connection.getresponse()
-        payload = response.read(2 * 1024 * 1024)
         if response.status < 200 or response.status >= 300:
-            raise RenderError(f"GitHub recusou o upload de asset (HTTP {response.status}).")
+            status = response.status
+            response.close()
+            raise RenderError("GitHub recusou o upload de asset.", operation="release", error_code="github_upload_failed", http_status=status)
+        payload = response.read(2 * 1024 * 1024)
         return json.loads(payload.decode("utf-8"))
-    except (OSError, http.client.HTTPException, TimeoutError):
-        raise RenderError("Falha de rede ao enviar asset ao GitHub Release.") from None
+    except (OSError, http.client.HTTPException, TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
+        raise RenderError("Não foi possível concluir o upload do asset.", operation="release", error_code="github_upload_failed") from None
     finally:
         connection.close()
 
 def main():
     if not SECRET or len(SECRET) < 32 or not re.fullmatch(r"[0-9a-f-]{36}", JOB_ID, re.I) or RUN_ID < 1:
-        raise RenderError("Configuração de execução incompleta; nada foi enviado.")
+        raise RenderError("Configuração de execução incompleta; nada foi enviado.", operation="worker", error_code="worker_unexpected")
     WORK.mkdir(parents=True, exist_ok=True)
     manifest = fetch_manifest()
     callback(manifest, "rendering", 3)
@@ -396,27 +447,30 @@ def main():
     probed = ffprobe(video)
     checks, duration, size = qa_result(video, captions, probed, manifest)
     if size > MAX_OUTPUT_BYTES:
-        callback(manifest, "failed", 90, message="O MP4 excedeu o limite de 1,9 GB; ajuste a duração ou o formato.")
-        raise RenderError("MP4 maior que o limite permitido para o Release.")
+        raise RenderError("O MP4 excedeu o limite seguro.", operation="qa", error_code="qa_failed")
     callback(manifest, "rendering", 88)
     release_id, asset_id = create_release_and_upload(video, captions, manifest)
     result = {"releaseId": release_id, "assetId": asset_id, "fileName": video.name, "fileSizeBytes": size, "durationSeconds": round(duration, 3), "qa": checks}
     response = callback(manifest, "qa", 95, result=result)
     if response.get("status") != "succeeded":
-        raise RenderError("O QA do Estúdio não aprovou o MP4; o Portão 2 continua bloqueado.")
+        raise RenderError("O QA do Estúdio não aprovou o MP4.", operation="qa", error_code="qa_failed")
     print(f"Render concluído. job={JOB_ID} release={release_id} asset={asset_id} duração={duration:.2f}s tamanho={size} bytes")
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        # A mensagem é limitada e não inclui roteiro, conteúdo dos arquivos nem segredos.
-        message = str(exc)[:350] if isinstance(exc, RenderError) else "Falha inesperada no worker; consulte o log técnico da etapa sem compartilhar segredos."
+        diagnostic = exc if isinstance(exc, RenderError) else RenderError("Falha inesperada no worker.", operation="worker", error_code="worker_unexpected")
         try:
             if JOB_ID and SECRET and RUN_ID:
                 fallback = {"jobId": JOB_ID, "cues": [], "title": "Render"}
-                callback(fallback, "failed", 90, message=message)
+                callback(fallback, "failed", 90, diagnostic=diagnostic)
         except Exception:
-            pass
-        print(message, file=sys.stderr)
+            print(json.dumps({"event": "render_failure_callback_failed", "operation": "callback", "errorCode": "callback_operation_failed"}, separators=(",", ":")), file=sys.stderr)
+        record = {"event": "render_failed", "operation": diagnostic.operation, "errorCode": diagnostic.error_code}
+        if diagnostic.http_status is not None:
+            record["httpStatus"] = diagnostic.http_status
+        if diagnostic.upstream_status is not None:
+            record["upstreamStatus"] = diagnostic.upstream_status
+        print(json.dumps(record, separators=(",", ":")), file=sys.stderr)
         sys.exit(1)

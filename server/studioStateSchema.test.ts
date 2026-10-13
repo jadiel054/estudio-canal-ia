@@ -49,6 +49,18 @@ describe("validação do estado do estúdio", () => {
     expect(() => parseStudioState(state)).toThrow(/weeklyGoal/);
   });
 
+  it("preserva o diagnóstico seguro associado a um job de render", () => {
+    const state: any = validState();
+    state.renderJobs = [{
+      id: "job-1", videoId: "video-1", status: "failed", attempts: 1,
+      error: "operation=voice code=tts_timeout http=400 upstream=429",
+      errorCode: "tts_timeout", errorOperation: "voice", httpStatus: 400, upstreamStatus: 429,
+    }];
+    expect(parseStudioState(state).renderJobs[0]).toMatchObject({
+      errorCode: "tts_timeout", errorOperation: "voice", httpStatus: 400, upstreamStatus: 429,
+    });
+  });
+
   it("rejeita entrada que não é objeto", () => {
     expect(() => parseStudioState("estado solto")).toThrow();
   });
