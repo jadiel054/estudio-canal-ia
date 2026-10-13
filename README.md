@@ -14,9 +14,9 @@ PWA mobile-first em PT-BR para planejar e operar conteúdo técnico de YouTube, 
 
 1. Abra **Radar** e escolha uma tendência, ou crie uma pauta em **Pautas** a partir de um projeto seu.
 2. Gere e edite o roteiro; confira a demonstração real e aprove no **Portão 1**.
-3. No **Estúdio**, registre capturas e licenças; após configurar a Etapa C, inicie o render real de um roteiro aprovado.
+3. No **Estúdio**, confira o estado das integrações sem expor segredos, registre capturas seguras e use o fluxo de render real somente após a aprovação do Portão 1 e a confirmação do dono.
 4. Em **Fila**, examine o MP4 e o QA verificável e faça manualmente o **Portão 2**.
-5. Baixe e publique manualmente. Depois de confirmar que publicou, use **Já publiquei — limpar cópia** para remover o Release temporário privado.
+5. Baixe e publique manualmente. Depois de confirmar a publicação, solicite a limpeza da cópia temporária e confira a execução do workflow.
 
 ## Banco e deploy
 
@@ -38,7 +38,7 @@ Vercel está configurada para construir pelo repositório conectado e usar o app
 - **Autenticação no Vercel:** as rotas protegidas ainda usam a autenticação Manus. É necessário adaptar/configurar um provedor de login compatível antes de habilitar Nexo e as funções protegidas fora do Manus. Não torne essas rotas públicas como atalho.
 - **LLM no Vercel:** o acesso ao runtime LLM Manus não é transferido automaticamente para Vercel. Configure um provedor externo e adapte sua chamada no servidor antes de esperar respostas generativas do Nexo.
 - **YouTube e TikTok:** a interface mostra as conexões, mas fluxos OAuth, upload, leitura de quota e analytics reais precisam ser implementados. Depois, o operador deverá criar/aprovar os aplicativos de desenvolvedor, informar Client ID/Secret e URIs de redirecionamento e conceder os escopos mínimos. A publicação manual permanece disponível.
-- **Produção de mídia:** o pipeline real FFmpeg/Actions, Gemini TTS, portões e limpeza manual pós-publicação estão implementados na branch da Etapa C; precisam de `GITHUB_ACTIONS_TOKEN` e `STUDIO_RENDER_HMAC_SECRET` configurados de forma protegida antes do uso. A execução real e a qualidade PT-BR ainda exigem teste/validação do dono.
+- **Produção de mídia:** o pipeline real FFmpeg/Actions, Gemini TTS, portões e limpeza manual pós-publicação estão integrados na `main` e implantados. O dono informou que cadastrou `GITHUB_ACTIONS_TOKEN` e `STUDIO_RENDER_HMAC_SECRET`; confirme no painel de integrações apenas o estado, nunca os valores. A prova ponta a ponta e a aceitação da voz PT-BR pelo dono ainda estão pendentes.
 
 ## Segurança
 
@@ -50,4 +50,4 @@ A coleta diária das fontes gratuitas, o score explicável, o cadastro de pautas
 
 ## Etapa C — pipeline de render real
 
-O render, HMAC, worker FFmpeg, capturas privadas, QA do MP4, download autenticado e workflow de limpeza estão detalhados em [`docs/progresso/etapa-c-progresso.md`](docs/progresso/etapa-c-progresso.md). **O código dessa etapa precisa ser mesclado/deployado e receber as credenciais descritas no relatório antes de processar um vídeo real.**
+O render, HMAC, worker FFmpeg, capturas privadas, QA do MP4, download autenticado e workflow de limpeza estão detalhados em [`docs/progresso/etapa-c-progresso.md`](docs/progresso/etapa-c-progresso.md). A Etapa C está mesclada e implantada; falta a prova ponta a ponta assistida. O primeiro render real consome quota e cria um Release temporário, então deve aguardar autorização explícita do dono. Portões 1 e 2 e publicação continuam manuais.
