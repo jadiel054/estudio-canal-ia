@@ -29,7 +29,13 @@ function audit(state: any, actor: EditorialActor, action: string, target: string
 
 function isDemoMode(state: any) { return state?.settings?.demoMode === true; }
 
-export async function executeEditorialCommand(command: EditorialCommand, context: { actor: EditorialActor; qa?: unknown } = { actor: "Você" }) {
+type EditorialContext = {
+  actor: EditorialActor;
+  qa?: unknown;
+  expectedScript?: { scriptId: string; version: number; updatedAt: string; content: string; status: string };
+};
+
+export async function executeEditorialCommand(command: EditorialCommand, context: EditorialContext = { actor: "Você" }) {
   const actor = context.actor;
   const state = await getStudioState() as any;
   if (!state) fail("O estado do estúdio ainda não foi importado para o Neon.");
@@ -44,11 +50,16 @@ export async function executeEditorialCommand(command: EditorialCommand, context
     }
     case "updateScript": {
       const script = state.scripts?.find((item: any) => item.id === command.scriptId); if (!script) fail("Roteiro não encontrado.");
+      const expected = context.expectedScript;
+      if (expected && (script.id !== expected.scriptId || script.version !== expected.version || script.updatedAt !== expected.updatedAt || script.content !== expected.content || script.status !== expected.status)) {
+        fail("O roteiro mudou enquanto o QA era executado. Recarregue a página e execute o QA novamente.");
+      }
       const idea = state.ideas?.find((item: any) => item.id === script.ideaId);
       const unchanged = script.content === command.content;
       const guard = canEditScript(script.status);
       script.content = command.content; script.updatedAt = now;
-      if (!unchanged) delete script.qa;
+      if (context.qa !== undefined) script.qa = context.qa;
+      else if (!unchanged) delete script.qa;
       if (guard.requiresReapproval && !unchanged) {
         // Brecha do Portão 1 fechada: editar um roteiro aprovado invalida a aprovação.
         script.version += 1; script.status = "Aguardando aprovação";
@@ -57,7 +68,7 @@ export async function executeEditorialCommand(command: EditorialCommand, context
         audit(state, actor, "Portão 1 reaberto por edição", target, `Versão ${script.version}. O conteúdo mudou depois da aprovação e exige nova decisão humana.`);
         break;
       }
-      target = script.title; audit(state, actor, "Roteiro salvo", target, `Versão ${script.version}${unchanged ? " (sem alteração de conteúdo)" : ""}`); break;
+      target = script.title; audit(state, actor, context.qa !== undefined ? "QA do roteiro executado" : "Roteiro salvo", target, `Versão ${script.version}${unchanged ? " (sem alteração de conteúdo)" : ""}${context.qa !== undefined ? "; QA vinculado exatamente ao texto salvo" : ""}`); break;
     }
     case "generateScript": {
       const idea = state.ideas?.find((item: any) => item.id === command.ideaId); if (!idea) fail("Pauta não encontrada.");

@@ -33,7 +33,7 @@ function baseState() {
   return {
     version: 1,
     ideas: [{ id: "idea-1", title: "Pauta", format: "Longo", status: "aguarda_aprov_roteiro" }],
-    scripts: [{ id: "script-1", ideaId: "idea-1", title: "Pauta", status: "Aguardando aprovação", version: 1, content: "texto", qa: { classifier: "heuristic", status: "revisar", estimatedDurationMinutes: 2, technicalFlags: [], repetitionFlags: [], policyTerms: [], originality: { demoRequired: true, demoSpecified: false, evidence: "não verificado", genericContentRisk: "alto" }, summary: "revisar manualmente" } }],
+    scripts: [{ id: "script-1", ideaId: "idea-1", title: "Pauta", status: "Aguardando aprovação", version: 1, updatedAt: "2026-01-01T00:00:00.000Z", content: "texto", qa: { classifier: "heuristic", status: "revisar", estimatedDurationMinutes: 2, technicalFlags: [], repetitionFlags: [], policyTerms: [], originality: { demoRequired: true, demoSpecified: false, evidence: "não verificado", genericContentRisk: "alto" }, summary: "revisar manualmente" } }],
     videos: [], assets: [], renderJobs: [], audit: [], chat: [], trends: [], adapters: [], connections: [],
     settings: { automation: { publicacao: "Manual" }, demoMode: false },
   };
@@ -98,6 +98,22 @@ describe("Etapa A · brecha do Portão 1", () => {
     const result: any = await executeEditorialCommand({ operation: "updateScript", scriptId: "script-1", content: "texto" });
     expect(result.scripts[0].status).toBe("Aprovado");
     expect(result.ideas[0].status).toBe("assets");
+  });
+
+  it("vincula QA ao texto revisado no mesmo salvamento", async () => {
+    const expectedScript = { scriptId: "script-1", version: 1, updatedAt: "2026-01-01T00:00:00.000Z", content: "texto", status: "Aguardando aprovação" };
+    const qa = { classifier: "llm", status: "revisar", estimatedDurationMinutes: 3, technicalFlags: [], repetitionFlags: [], policyTerms: [], originality: { demoRequired: true, demoSpecified: false, evidence: "não verificado", genericContentRisk: "médio" }, summary: "revisar" };
+    const result: any = await executeEditorialCommand({ operation: "updateScript", scriptId: "script-1", content: "texto revisado" }, { actor: "Você", qa, expectedScript });
+    expect(result.scripts[0].content).toBe("texto revisado");
+    expect(result.scripts[0].qa).toEqual(qa);
+    expect(result.audit[0].action).toBe("QA do roteiro executado");
+  });
+
+  it("rejeita persistência do QA se o roteiro mudou durante a análise", async () => {
+    const expectedScript = { scriptId: "script-1", version: 1, updatedAt: "2026-01-01T00:00:00.000Z", content: "texto", status: "Aguardando aprovação" };
+    mocked.state.scripts[0].content = "edição concorrente";
+    await expect(executeEditorialCommand({ operation: "updateScript", scriptId: "script-1", content: "texto revisado" }, { actor: "Você", qa: { summary: "QA" }, expectedScript })).rejects.toThrow("mudou enquanto o QA");
+    expect(mocked.saveStudioState).not.toHaveBeenCalled();
   });
 });
 
