@@ -5,8 +5,9 @@
   "license": "MIT",
   "scripts": {
     "dev": "NODE_ENV=development tsx watch server/_core/index.ts",
-    "build": "vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
-    "start": "NODE_ENV=production node dist/index.js",
+    "build": "vite build && pnpm run build:server",
+    "build:server": "esbuild server/handler.ts --platform=node --packages=external --bundle --format=esm --alias:@shared=./shared --alias:@=./client/src --outfile=dist/server.mjs",
+    "start": "NODE_ENV=production node dist/server.mjs",
     "check": "tsc --noEmit",
     "format": "prettier --write .",
     "test": "vitest run",
