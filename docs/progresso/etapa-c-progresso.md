@@ -31,7 +31,7 @@ O smoke render usa uma **fixture local** com trilha procedural; não acessou o N
 1. **PAT de dispatch:** o endpoint precisa de `GITHUB_ACTIONS_TOKEN` na Vercel. O token deve ser fine-grained, limitado ao repositório `jadiel054/estudio-canal-ia`, com `Actions: read/write` e `Contents: read`. A integração GitHub disponível retornou HTTP 403 ao consultar Actions Secrets; não tentei contornar nem solicitei tokens por chat.
 2. **HMAC compartilhado:** criar um segredo aleatório de pelo menos 32 caracteres e cadastrar o mesmo valor como `STUDIO_RENDER_HMAC_SECRET` no ambiente **Production** da Vercel e como secret do repositório em **Settings → Secrets and variables → Actions**. Não envie esse valor em mensagens.
 3. **Roteiro e voz reais:** a prova requer uma pauta real, gerar/revisar o roteiro e aprová-lo no Portão 1. Se usar TTS, ouvir a amostra PT-BR e confirmar a qualidade antes de iniciar o render. O painel não trata demonstração nem dados de seed como produção.
-4. **Deploy:** o código está na branch de trabalho; precisa ser revisado/mesclado em `main` para que Vercel publique as rotas e GitHub encontre os workflows. Até lá, o deployment existente não contém esta Etapa C.
+4. **Deploy:** o PR [#1](https://github.com/jadiel054/estudio-canal-ia/pull/1) está aberto, mas o Preview da Vercel para `f052a35` aparece como **BLOCKED**, não como erro de build. O detalhe da Vercel aponta para configuração de colaboração da equipe. A documentação oficial informa que, em equipes Hobby com repositório privado, o autor do commit precisa ser o dono conectado; não vou falsificar autoria nem contornar essa regra. O deployment existente continua sem a Etapa C.
 
 ### Configuração pelo navegador no celular
 
@@ -52,3 +52,4 @@ A documentação do Gemini informa que, no nível gratuito, entradas e saídas p
 - [Dispatch de workflow por API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event) e [permissões de PAT fine-grained](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens).
 - [Billing/limites do GitHub Actions](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
 - [Discussão oficial sobre a licença dos pesos Piper](https://huggingface.co/rhasspy/piper-voices/discussions/111).
+- [Resolução de bloqueios de colaboração/deployment na Vercel](https://vercel.com/docs/deployments/troubleshoot-project-collaboration#team-configuration).
