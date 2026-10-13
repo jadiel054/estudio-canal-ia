@@ -37,7 +37,7 @@ export type StudioState = {
 type StudioActions = {
   createIdea: (params: Pick<Idea, "title" | "format"> & Partial<Pick<Idea, "trendId" | "origin" | "angle">>) => Idea;
   updateScript: (id: string, content: string) => void;
-  generateScript: (ideaId: string) => void;
+  generateScript: (ideaId: string, generatedContent?: string) => void;
   approveScript: (ideaId: string) => void;
   requestScriptChanges: (ideaId: string) => void;
   startRender: (ideaId: string) => void;
@@ -133,7 +133,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
-  const generateScript: StudioActions["generateScript"] = ideaId => {
+  const generateScript: StudioActions["generateScript"] = (ideaId, generatedContent) => {
     const currentIdea = state.ideas.find(item => item.id === ideaId);
     if (!currentIdea) {
       toast.error("Pauta não encontrada");
@@ -153,7 +153,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
         ideaId,
         version: 1,
         title: idea.title,
-        content: `# Gancho — 0:00\nMostre em 10 segundos o resultado real de: ${idea.title}.\n\n# Problema — 0:18\nExplique o custo de fazer isso sem uma stack clara.\n\n# Demonstração real — 0:55\nAbra o projeto, rode o código, mostre uma decisão técnica e um erro que foi corrigido.\n\n# Resultado — 5:40\nCompare antes/depois e mostre o artefato final.\n\n# CTA — 6:30\nConvide para o próximo passo prático, sem promessa genérica.`,
+        content: generatedContent ?? `# Gancho — 0:00\nMostre em 10 segundos o resultado real de: ${idea.title}.\n\n# Problema — 0:18\nExplique o custo de fazer isso sem uma stack clara.\n\n# Demonstração real — 0:55\nAbra o projeto, rode o código, mostre uma decisão técnica e um erro que foi corrigido.\n\n# Resultado — 5:40\nCompare antes/depois e mostre o artefato final.\n\n# CTA — 6:30\nConvide para o próximo passo prático, sem promessa genérica.`,
         status: "Aguardando aprovação",
         updatedAt: "agora",
       };
