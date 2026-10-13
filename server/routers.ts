@@ -2,10 +2,10 @@ import { COOKIE_NAME } from "@shared/const";
 import { z } from "zod";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { invokeLLM } from "./_core/llm";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
-import { NEXO_SYSTEM_PROMPT, agentToolDefinitions } from "./agent/systemPrompt";
+import { NEXO_SYSTEM_PROMPT } from "./agent/systemPrompt";
 import { studioPersistenceStatus, verifyStudioDatabase } from "./studioRepository";
+import { completeWithFallback, getProviderSettings, getProviderUsage, testProvider, updateProviderSettings, type LLMProviderId, type LLMTask } from "./llmProviders";
 
 type AgentAction =
   | { type: "setAutomation"; key: "radar" | "roteiro" | "producao" | "publicacao"; value: "Automática" | "Manual" }
@@ -60,28 +60,40 @@ export const appRouter = router({
         const actions = controlledActions(input.message);
         const safeFallback = fallbackReply(actions);
         try {
-          const response = await invokeLLM({
-            model: "gpt-5-mini",
-            messages: [
-              { role: "system", content: NEXO_SYSTEM_PROMPT },
-              { role: "system", content: "Responda em no máximo 110 palavras. Não mencione segredos nem prometa execução externa. As ações permitidas já foram validadas pelo sistema." },
-              { role: "user", content: input.message },
-            ],
-            tools: agentToolDefinitions,
-            toolChoice: "auto",
-          });
-          const content = response.choices[0]?.message.content;
-          const message = typeof content === "string" && content.trim() ? content.trim() : safeFallback;
-          return { message, actions };
+          const response = await completeWithFallback("agente", [
+            { role: "system", content: NEXO_SYSTEM_PROMPT },
+            { role: "system", content: "Responda em no máximo 110 palavras. Não mencione segredos nem prometa execução externa. As ações permitidas já foram validadas pelo sistema." },
+            { role: "user", content: input.message },
+          ]);
+          return { message: response.text, actions, provider: response.provider, switched: response.switched, fallbackReason: response.fallbackReason };
         } catch (error) {
           console.warn("[Nexo] LLM indisponível; usando resposta operacional segura", error instanceof Error ? error.message : error);
-          return { message: safeFallback, actions };
+          const providerError = error instanceof Error && (/Todos os provedores|Nenhum provedor/.test(error.message))
+            ? `${error.message} Tente novamente.`
+            : safeFallback;
+          return { message: providerError, actions };
         }
       }),
   }),
   studio: router({
     persistence: protectedProcedure.query(() => studioPersistenceStatus()),
     verifyPersistence: protectedProcedure.mutation(() => verifyStudioDatabase()),
+  }),
+  llm: router({
+    settings: protectedProcedure.query(() => getProviderSettings()),
+    usage: protectedProcedure.query(() => getProviderUsage()),
+    updateSettings: protectedProcedure
+      .input(z.object({
+        gemini: z.object({ enabled: z.boolean(), priority: z.number().int().min(1).max(2), tasks: z.array(z.enum(["roteiro", "qa", "agente", "leve"])) }),
+        groq: z.object({ enabled: z.boolean(), priority: z.number().int().min(1).max(2), tasks: z.array(z.enum(["roteiro", "qa", "agente", "leve"])) }),
+      }))
+      .mutation(({ input }) => updateProviderSettings(input)),
+    testConnection: protectedProcedure
+      .input(z.object({ provider: z.enum(["gemini", "groq"]) }))
+      .mutation(({ input }) => testProvider(input.provider as LLMProviderId)),
+    complete: protectedProcedure
+      .input(z.object({ task: z.enum(["roteiro", "qa", "agente", "leve"]), messages: z.array(z.object({ role: z.enum(["system", "user", "assistant"]), content: z.string().max(20_000) })), preferred: z.enum(["gemini", "groq"]).optional() }))
+      .mutation(({ input }) => completeWithFallback(input.task as LLMTask, input.messages, input.preferred)),
   }),
 });
 
