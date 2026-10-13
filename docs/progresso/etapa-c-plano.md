@@ -33,6 +33,7 @@ O manifesto nunca deve ir como JSON visível nos logs ou como input de workflow:
 ## Bloqueios para a prova ponta a ponta
 
 - O repositório está **público neste momento**. Não vou enviar roteiro, capturas ou vídeo para uma execução real enquanto essa visibilidade não for deliberadamente alterada para privada pelo dono. Releases em rascunho limitam a leitura a quem tem escrita, mas manter o projeto privado é a escolha mais segura para produção.
+- Ao tornar o repositório privado, forks públicos existentes continuam públicos e são destacados; o GitHub também apaga estrelas e watchers. Por isso, a mudança de visibilidade fica a cargo do dono, após revisar esses efeitos. [11]
 - O GitHub CLI não tem permissão para ler Actions Secrets neste repositório (retorno 403); não tentei contornar isso nem revelar tokens. Ainda será necessário configurar, sem compartilhar no chat, um PAT fine-grained somente para este repositório no ambiente Production da Vercel e um mesmo segredo HMAC no Vercel e em Actions Secrets.
 - A prova deverá usar uma pauta real, com roteiro aprovado no Portão 1 e capturas/código que o dono escolha. Dados de demonstração não serão tratados como insumo real.
 
@@ -50,3 +51,5 @@ O manifesto nunca deve ir como JSON visível nos logs ou como input de workflow:
 [8]: https://docs.github.com/en/billing/concepts/product-billing/github-actions "Franquias e faturamento do GitHub Actions"
 [9]: https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event "Disparo de workflow via REST API"
 [10]: https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens "Permissões de PAT fine-grained"
+
+[11]: https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/setting-repository-visibility "Consequências de alterar a visibilidade do repositório"
