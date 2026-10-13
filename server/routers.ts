@@ -13,6 +13,7 @@ import { executeEditorialCommand, type EditorialCommand } from "./editorial";
 import { parseStudioState, StateTooLargeError } from "./studioStateSchema";
 import { getRadarState, refreshRadar } from "./radar";
 import { generateScriptForIdea } from "./scriptPipeline";
+import { generateSpeech, getTtsSettings, ttsSettingsSchema, updateTtsSettings } from "./ttsProvider";
 
 async function enforceLLMRateLimit(userId: string) { if (!(await consumeRateLimit(`llm:${userId}`, 20))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Limite de 20 chamadas LLM por minuto atingido. Tente novamente em instantes." }); }
 const taskSchema = z.enum(["roteiro", "qa", "agente", "leve"]);
@@ -151,6 +152,16 @@ export const appRouter = router({
     updateSettings: adminProcedure.input(z.object({ gemini: providerPatchSchema, groq: providerPatchSchema })).mutation(({ input }) => updateProviderSettings(input as any)),
     testConnection: adminProcedure.input(z.object({ provider: z.enum(["gemini", "groq"]) })).mutation(({ input }) => testProvider(input.provider as LLMProviderId)),
     complete: adminProcedure.input(z.object({ task: taskSchema, messages: z.array(messageSchema).min(1).max(12), preferred: z.enum(["gemini", "groq"]).optional() }).superRefine((input, ctx) => { const total = input.messages.reduce((sum, item) => sum + item.content.length, 0); if (total > 60_000) ctx.addIssue({ code: "custom", message: "O total das mensagens excede 60.000 caracteres." }); })).mutation(async ({ input, ctx }) => { await enforceLLMRateLimit(ctx.user.id); return completeWithFallback(input.task as LLMTask, input.messages, input.preferred); }),
+  }),
+  tts: router({
+    settings: adminProcedure.query(async () => ({ ...await getTtsSettings(), configured: Boolean(process.env.STUDIO_LLM_GEMINI_KEY), dataPolicy: "O nível gratuito pode usar entradas e saídas para melhoria de produtos e revisão humana; não envie dados sensíveis." })),
+    updateSettings: adminProcedure.input(ttsSettingsSchema).mutation(async ({ input }) => updateTtsSettings(input)),
+    test: adminProcedure.mutation(async ({ ctx }) => {
+      if (!(await consumeRateLimit(`tts-test:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "A amostra de voz pode ser gerada uma vez por minuto." });
+      const settings = await getTtsSettings();
+      const result = await generateSpeech("Olá! Este é um teste de voz em português brasileiro para o Estúdio de Canal IA.", settings);
+      return { audioBase64: result.audio.toString("base64"), contentType: result.contentType, model: result.model, voice: result.voice, fallback: result.fallback, bytes: result.audio.length };
+    }),
   }),
 });
 export type AppRouter = typeof appRouter;
