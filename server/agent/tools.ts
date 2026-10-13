@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { appendStudioAudit, getStudioQueueSummary, studioPersistenceStatus } from "../studioRepository";
+import { appendStudioAudit, createAgentConfirmation, getStudioQueueSummary, studioPersistenceStatus } from "../studioRepository";
 import { getRawProviderSettings, updateProviderSettings } from "../llmProviders";
 import type { AgentAction } from "../../client/src/data/studio";
 
@@ -20,7 +20,7 @@ const schemas = {
   solicitar_confirmacao: z.object({ acao: z.enum(["publicacao_automatica", "aumentar_teto", "apagar_dados"]), descricao: z.string().trim().min(10).max(500) }),
 };
 
-type ToolResult = { summary: string; actions: AgentAction[]; confirmationRequired?: { subject: string; description: string } };
+type ToolResult = { summary: string; actions: AgentAction[]; confirmationRequired?: { subject: string; description: string; confirmationId: string } };
 export async function executeAgentTool(name: string, rawArgs: Record<string, unknown>): Promise<ToolResult> {
   if (!(name in schemas)) return { summary: "Ferramenta desconhecida; nenhuma alteração foi feita.", actions: [] };
   const parsed = schemas[name as keyof typeof schemas].safeParse(rawArgs);
@@ -28,11 +28,12 @@ export async function executeAgentTool(name: string, rawArgs: Record<string, unk
   const args = parsed.data as any;
   if (name === "consultar_fila") { const queue = await getStudioQueueSummary(); await appendStudioAudit({ actor: "Nexo", action: "Fila consultada por ferramenta", target: "fila", details: queue }); return { summary: queue.persisted ? `Fila consultada no Neon: ideias ${JSON.stringify(queue.ideas)}, vídeos ${JSON.stringify(queue.videos)}, jobs ${JSON.stringify(queue.jobs)}.` : `Fila indisponível no Neon. ${studioPersistenceStatus().detail}`, actions: [] }; }
   if (name === "alterar_automacao") {
+    if (args.etapa === "publicacao" && args.modo === "Automática") { const confirmationId = await createAgentConfirmation("publicacao_automatica", { etapa: args.etapa, modo: args.modo }); const confirmation = { subject: "publicacao_automatica", description: "Ativar publicação automática remove o Portão 2 e pode enviar conteúdo sem revisão humana.", confirmationId }; await appendStudioAudit({ actor: "Nexo", action: "Confirmação solicitada para publicação automática", target: args.etapa, details: confirmation }); return { summary: "Publicação automática bloqueada até confirmação explícita do dono.", actions: [{ type: "requestConfirmation", ...confirmation }] }; }
     const action = { type: "setAutomation" as const, key: args.etapa, value: args.modo }; await appendStudioAudit({ actor: "Nexo", action: "Automação atualizada por ferramenta", target: args.etapa, details: { value: args.modo } }); return { summary: `A etapa ${args.etapa} foi alterada para ${args.modo} e registrada no log.`, actions: [action] };
   }
   if (name === "criar_pauta") {
     const action = { type: "createIdea" as const, title: args.titulo, format: args.formato, origin: "Agente" as const }; await appendStudioAudit({ actor: "Nexo", action: "Pauta criada por ferramenta", target: args.titulo, details: { format: args.formato } }); return { summary: `A pauta “${args.titulo}” foi criada em Pesquisa.`, actions: [action] };
   }
-  if (name === "trocar_provedor") { const current = await getRawProviderSettings(); const selected = args.provedor as "gemini" | "groq"; const other = selected === "gemini" ? "groq" : "gemini"; await updateProviderSettings({ [selected]: { ...current[selected], enabled: true, priority: 1, tasks: Array.from(new Set([...current[selected].tasks, args.tarefa])) }, [other]: { ...current[other], priority: 2, tasks: current[other].tasks.filter(task => task !== args.tarefa) } }); await appendStudioAudit({ actor: "Nexo", action: "Provedor trocado por ferramenta", target: args.tarefa, details: { provider: selected } }); return { summary: `A preferência de ${args.tarefa} foi alterada para ${selected} e registrada no log.`, actions: [] }; }
-  const confirmation = { subject: args.acao, description: args.descricao }; await appendStudioAudit({ actor: "Nexo", action: "Confirmação solicitada para ação sensível", target: args.acao, details: { description: args.descricao } }); return { summary: "A ação é sensível e não foi executada. A confirmação explícita do dono é necessária.", actions: [{ type: "requestConfirmation", ...confirmation }], confirmationRequired: confirmation };
+  if (name === "trocar_provedor") { const current = await getRawProviderSettings(); const selected = args.provedor as "gemini" | "groq"; const order = current.taskOrder[args.tarefa as keyof typeof current.taskOrder]; const nextOrder = [selected, ...order.filter(id => id !== selected)]; await updateProviderSettings({ taskOrder: { ...current.taskOrder, [args.tarefa]: nextOrder } } as any); await appendStudioAudit({ actor: "Nexo", action: "Provedor trocado por tarefa", target: args.tarefa, details: { provider: selected, order: nextOrder } }); return { summary: `A preferência de ${args.tarefa} foi alterada para ${selected}; o outro provedor permanece como reserva.`, actions: [] }; }
+  const confirmationId = await createAgentConfirmation(args.acao, { descricao: args.descricao }); const confirmation = { subject: args.acao, description: args.descricao, confirmationId }; await appendStudioAudit({ actor: "Nexo", action: "Confirmação solicitada para ação sensível", target: args.acao, details: { description: args.descricao, confirmationId } }); return { summary: "A ação é sensível e não foi executada. A confirmação explícita do dono é necessária.", actions: [{ type: "requestConfirmation", ...confirmation }], confirmationRequired: confirmation };
 }

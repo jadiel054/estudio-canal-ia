@@ -124,7 +124,7 @@ export type AgentAction =
   | { type: "setAutomation"; key: keyof AutomationSettings; value: "Automática" | "Manual" }
   | { type: "createIdea"; title: string; format: Format; origin?: Idea["origin"] }
   | { type: "selectAdapter"; adapterId: string }
-  | { type: "requestConfirmation"; subject: string; description: string }
+  | { type: "requestConfirmation"; subject: string; description: string; confirmationId?: string }
   | { type: "connectPlatform"; platform: Platform };
 
 export type AutomationSettings = {

@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import { randomUUID } from "node:crypto"
 
 export type AuditWrite = {
   actor: "Você" | "Nexo" | "Sistema";
@@ -146,3 +147,29 @@ export async function getStudioQueueSummary() {
     return { persisted: false as const, ideas: {}, videos: {}, jobs: {} };
   }
 }
+
+export async function getStoredOwnerPasswordHash() {
+  const client = getNeonPool(); if (!client) return null;
+  try { const result = await client.query<{ value: string }>("SELECT value #>> '{}' AS value FROM app_settings WHERE key = 'owner_password_hash' LIMIT 1"); return result.rows[0]?.value ?? null; } catch { return null; }
+}
+export async function setStoredOwnerPasswordHash(hash: string) {
+  const client = getNeonPool(); if (!client) throw new Error("Neon não configurado para armazenar a senha.");
+  await client.query("INSERT INTO app_settings (key, value, updated_at) VALUES ('owner_password_hash', to_jsonb($1::text), NOW()) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()", [hash]);
+}
+export async function checkRateLimit(keys: string[], limit: number) {
+  const client = getNeonPool(); if (!client) return true;
+  const connection = await client.connect();
+  try { await connection.query("BEGIN"); for (const key of keys) { const result = await connection.query<{ blocked_until: Date | null; window_started: Date; calls: number }>("SELECT blocked_until, window_started, calls FROM rate_limit_state WHERE key = $1 FOR UPDATE", [key]); const row = result.rows[0]; if (row?.blocked_until && row.blocked_until.getTime() > Date.now()) { await connection.query("COMMIT"); return false; } if (row && Date.now() - row.window_started.getTime() >= 60_000) await connection.query("UPDATE rate_limit_state SET window_started = NOW(), calls = 0, updated_at = NOW() WHERE key = $1", [key]); } await connection.query("COMMIT"); return true; } catch { await connection.query("ROLLBACK"); return true; } finally { connection.release(); }
+}
+export async function consumeRateLimit(key: string, limit: number) {
+  const client = getNeonPool(); if (!client) return true;
+  const connection = await client.connect();
+  try { await connection.query("BEGIN"); const result = await connection.query<{ window_started: Date; calls: number }>("SELECT window_started, calls FROM rate_limit_state WHERE key = $1 FOR UPDATE", [key]); const row = result.rows[0]; if (!row || Date.now() - row.window_started.getTime() >= 60_000) await connection.query("INSERT INTO rate_limit_state (key, window_started, calls, updated_at) VALUES ($1, NOW(), 1, NOW()) ON CONFLICT (key) DO UPDATE SET window_started = NOW(), calls = 1, updated_at = NOW()", [key]); else if (row.calls >= limit) { await connection.query("ROLLBACK"); return false; } else await connection.query("UPDATE rate_limit_state SET calls = calls + 1, updated_at = NOW() WHERE key = $1", [key]); await connection.query("COMMIT"); return true; } catch { await connection.query("ROLLBACK"); return true; } finally { connection.release(); }
+}
+export async function recordAuthFailure(keys: string[]) {
+  const client = getNeonPool(); if (!client) return;
+  for (const key of keys) await client.query("INSERT INTO rate_limit_state (key, failed_attempts, blocked_until, updated_at) VALUES ($1, 1, NULL, NOW()) ON CONFLICT (key) DO UPDATE SET failed_attempts = rate_limit_state.failed_attempts + 1, blocked_until = CASE WHEN rate_limit_state.failed_attempts + 1 >= 20 THEN NOW() + INTERVAL '1 hour' WHEN rate_limit_state.failed_attempts + 1 >= 10 THEN NOW() + INTERVAL '10 minutes' WHEN rate_limit_state.failed_attempts + 1 >= 5 THEN NOW() + INTERVAL '1 minute' ELSE rate_limit_state.blocked_until END, updated_at = NOW()", [key]);
+}
+export async function resetAuthFailures(keys: string[]) { const client = getNeonPool(); if (!client) return; await client.query("UPDATE rate_limit_state SET failed_attempts = 0, blocked_until = NULL, updated_at = NOW() WHERE key = ANY($1::text[])", [keys]); }
+export async function createAgentConfirmation(action: string, payload: Record<string, unknown>) { const client = getNeonPool(); const id = randomUUID(); if (!client) return id; await client.query("INSERT INTO agent_confirmations (id, action, payload) VALUES ($1, $2, $3::jsonb)", [id, action, JSON.stringify(payload)]); return id; }
+export async function resolveAgentConfirmation(id: string, approved: boolean) { const client = getNeonPool(); if (!client) return null; const result = await client.query<{ action: string; payload: Record<string, unknown> }>("UPDATE agent_confirmations SET status = $2, resolved_at = NOW() WHERE id = $1 AND status = 'pending' RETURNING action, payload", [id, approved ? "approved" : "cancelled"]); return result.rows[0] ?? null; }
