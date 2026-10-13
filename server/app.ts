@@ -9,6 +9,12 @@ import { studioPersistenceStatus, verifyStudioDatabase } from "./studioRepositor
 export function registerApiRoutes(app: Express) {
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  // Nenhuma resposta de API pode ser armazenada por browser, CDN ou service worker.
+  // Isso inclui sessão, configuração, estado do Neon e respostas autenticadas do tRPC.
+  app.use("/api", (_req, res, next) => {
+    res.set("Cache-Control", "no-store, private");
+    next();
+  });
 
   /**
    * Health check com dois níveis:
