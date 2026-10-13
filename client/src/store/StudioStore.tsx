@@ -1,5 +1,6 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { trpc } from "@/lib/trpc";
 import { canApproveScript, canApproveVideo, canGenerateScript, canRequestVideoAdjustment, canSchedule, canStartRender } from "@shared/workflowPolicy";
 import {
   type Adapter,
@@ -54,6 +55,7 @@ type StudioActions = {
   applyAgentActions: (actions: AgentAction[]) => void;
   addAudit: (entry: Omit<AuditEntry, "id" | "at">) => void;
   resetDemo: () => void;
+  importDeviceData: () => void;
 };
 
 type StudioContextValue = StudioState & StudioActions;
@@ -76,14 +78,24 @@ function initialState(): StudioState {
 
 export function StudioProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<StudioState>(initialState);
+  const deviceSnapshot = useRef(state);
+  const [hydrated, setHydrated] = useState(false);
+  const [serverBacked, setServerBacked] = useState(false);
+  const stateQuery = trpc.studio.state.useQuery(undefined, { retry: 1, refetchOnWindowFocus: false });
+  const saveState = trpc.studio.saveState.useMutation();
+  const importState = trpc.studio.importState.useMutation({ onSuccess: () => { setState(deviceSnapshot.current); setServerBacked(true); toast.success("Dados deste aparelho importados para o Neon"); }, onError: error => toast.error("Importação indisponível", { description: `${error.message} Tente de novo.` }) });
 
   useEffect(() => {
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(state));
-    } catch {
-      // Sem bloqueio de interface quando o navegador nega persistência.
-    }
-  }, [state]);
+    if (!stateQuery.isSuccess || hydrated) return;
+    if (stateQuery.data) { setState(stateQuery.data as StudioState); setServerBacked(true); }
+    setHydrated(true);
+  }, [stateQuery.isSuccess, stateQuery.data, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated || !serverBacked) return;
+    const timer = window.setTimeout(() => saveState.mutate(state), 350);
+    return () => window.clearTimeout(timer);
+  }, [state, hydrated, serverBacked]);
 
   const addAudit = (entry: Omit<AuditEntry, "id" | "at">) => {
     setState(current => ({
@@ -410,11 +422,12 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     setState({ ...restored, audit: [entry, ...restored.audit] });
     toast.success("Dados de demonstração restaurados");
   };
+  const importDeviceData = () => importState.mutate(deviceSnapshot.current);
 
   const value = useMemo<StudioContextValue>(() => ({
     ...state, createIdea, updateScript, generateScript, approveScript, requestScriptChanges,
     startRender, approveVideo, requestVideoChanges, scheduleVideo, retryVideo, addAsset, updateSettings,
-    setAutomation, selectAdapter, requestPlatformConnection, addChat, applyAgentActions, addAudit, resetDemo,
+    setAutomation, selectAdapter, requestPlatformConnection, addChat, applyAgentActions, addAudit, resetDemo, importDeviceData,
   }), [state]);
 
   return <StudioContext.Provider value={value}>{children}</StudioContext.Provider>;

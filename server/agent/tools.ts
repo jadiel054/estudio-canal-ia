@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { appendStudioAudit, createAgentConfirmation, getStudioQueueSummary, studioPersistenceStatus } from "../studioRepository";
+import { randomUUID } from "node:crypto";
+import { appendStudioAudit, createAgentConfirmation, getStudioQueueSummary, getStudioState, saveStudioState, studioPersistenceStatus } from "../studioRepository";
 import { getRawProviderSettings, updateProviderSettings } from "../llmProviders";
 import type { AgentAction } from "../../client/src/data/studio";
 
@@ -29,7 +30,7 @@ export async function executeAgentTool(name: string, rawArgs: Record<string, unk
   if (name === "consultar_fila") { const queue = await getStudioQueueSummary(); await appendStudioAudit({ actor: "Nexo", action: "Fila consultada por ferramenta", target: "fila", details: queue }); return { summary: queue.persisted ? `Fila consultada no Neon: ideias ${JSON.stringify(queue.ideas)}, vídeos ${JSON.stringify(queue.videos)}, jobs ${JSON.stringify(queue.jobs)}.` : `Fila indisponível no Neon. ${studioPersistenceStatus().detail}`, actions: [] }; }
   if (name === "alterar_automacao") {
     if (args.etapa === "publicacao" && args.modo === "Automática") { const confirmationId = await createAgentConfirmation("publicacao_automatica", { etapa: args.etapa, modo: args.modo }); const confirmation = { subject: "publicacao_automatica", description: "Ativar publicação automática remove o Portão 2 e pode enviar conteúdo sem revisão humana.", confirmationId }; await appendStudioAudit({ actor: "Nexo", action: "Confirmação solicitada para publicação automática", target: args.etapa, details: confirmation }); return { summary: "Publicação automática bloqueada até confirmação explícita do dono.", actions: [{ type: "requestConfirmation", ...confirmation }] }; }
-    const action = { type: "setAutomation" as const, key: args.etapa, value: args.modo }; await appendStudioAudit({ actor: "Nexo", action: "Automação atualizada por ferramenta", target: args.etapa, details: { value: args.modo } }); return { summary: `A etapa ${args.etapa} foi alterada para ${args.modo} e registrada no log.`, actions: [action] };
+    const state = await getStudioState(); if (!state) return { summary: "Não alterei a automação: o estado do estúdio ainda não foi importado para o Neon.", actions: [] }; const next = state as any; next.settings = { ...next.settings, automation: { ...next.settings.automation, [args.etapa]: args.modo } }; next.audit = [{ id: randomUUID(), actor: "Nexo", action: "Automação atualizada por ferramenta", target: args.etapa, at: new Date().toISOString(), detail: args.modo }, ...(next.audit ?? [])].slice(0, 500); await saveStudioState(next, { allowPublicationAutomation: false }); await appendStudioAudit({ actor: "Nexo", action: "Automação atualizada por ferramenta", target: args.etapa, details: { value: args.modo } }); return { summary: `A etapa ${args.etapa} foi alterada para ${args.modo} e persistida no Neon.`, actions: [] };
   }
   if (name === "criar_pauta") {
     const action = { type: "createIdea" as const, title: args.titulo, format: args.formato, origin: "Agente" as const }; await appendStudioAudit({ actor: "Nexo", action: "Pauta criada por ferramenta", target: args.titulo, details: { format: args.formato } }); return { summary: `A pauta “${args.titulo}” foi criada em Pesquisa.`, actions: [action] };
