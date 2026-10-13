@@ -2,6 +2,7 @@ import { Pool } from "pg";
 import { randomUUID } from "node:crypto"
 
 export type AuditWrite = {
+  /** Ator real da ação: dono autenticado, agente Nexo ou o próprio sistema. */
   actor: "Você" | "Nexo" | "Sistema";
   action: string;
   target: string;
@@ -17,6 +18,21 @@ export type LLMUsageWrite = {
   inputTokens?: number;
   outputTokens?: number;
 };
+
+/**
+ * Conflito de concorrência otimista.
+ *
+ * Os comandos editoriais leem o estado inteiro, alteram e gravam. Para impedir
+ * que dois comandos simultâneos sobrescrevam um ao outro, cada gravação carrega
+ * a versão lida e a instrução SQL só afeta a linha quando a versão no banco
+ * continua a mesma (`WHERE ... version = $2`). Sem linhas afetadas = conflito.
+ */
+export class StateConflictError extends Error {
+  constructor(message = "Conflito de concorrência: outra operação salvou o estado do estúdio ao mesmo tempo. Recarregue a tela e repita a ação.") {
+    super(message);
+    this.name = "StateConflictError";
+  }
+}
 
 let pool: Pool | undefined;
 
@@ -168,15 +184,75 @@ export async function consumeRateLimit(key: string, limit: number) {
 }
 export async function recordAuthFailure(keys: string[]) {
   const client = getNeonPool(); if (!client) return;
-  for (const key of keys) await client.query("INSERT INTO rate_limit_state (key, failed_attempts, blocked_until, updated_at) VALUES ($1, 1, NULL, NOW()) ON CONFLICT (key) DO UPDATE SET failed_attempts = rate_limit_state.failed_attempts + 1, blocked_until = CASE WHEN key = 'auth:global' AND rate_limit_state.failed_attempts + 1 >= 50 THEN NOW() + INTERVAL '10 minutes' WHEN key <> 'auth:global' AND rate_limit_state.failed_attempts + 1 >= 20 THEN NOW() + INTERVAL '1 hour' WHEN key <> 'auth:global' AND rate_limit_state.failed_attempts + 1 >= 10 THEN NOW() + INTERVAL '10 minutes' WHEN key <> 'auth:global' AND rate_limit_state.failed_attempts + 1 >= 5 THEN NOW() + INTERVAL '1 minute' ELSE rate_limit_state.blocked_until END, updated_at = NOW()", [key]);
+  for (const key of keys) await client.query("INSERT INTO rate_limit_state (key, failed_attempts, blocked_until, updated_at) VALUES ($1, 1, NULL, NOW()) ON CONFLICT (key) DO UPDATE SET failed_attempts = rate_limit_state.failed_attempts + 1, blocked_until = CASE WHEN key = 'auth:global' AND rate_limit_state.failed_attempts + 1 >= 50 THEN NOW() + INTERVAL '10 minutes' WHEN key <> 'auth:global' AND rate_limit_state.failed_attempts + 1 >= 10 THEN NOW() + INTERVAL '10 minutes' WHEN key <> 'auth:global' AND rate_limit_state.failed_attempts + 1 >= 5 THEN NOW() + INTERVAL '1 minute' ELSE rate_limit_state.blocked_until END, updated_at = NOW()", [key]);
 }
 export function authRatePolicy(key: string) { return key === "auth:global" ? { maxFailures: 50, maxBlockMinutes: 10 } : { maxFailures: 20, maxBlockMinutes: 60 }; }
 export async function resetAuthFailures(keys: string[]) { const client = getNeonPool(); if (!client) return; await client.query("UPDATE rate_limit_state SET failed_attempts = 0, blocked_until = NULL, updated_at = NOW() WHERE key = ANY($1::text[])", [keys]); }
 export async function createAgentConfirmation(action: string, payload: Record<string, unknown>) { const client = getNeonPool(); const id = randomUUID(); if (!client) return id; await client.query("INSERT INTO agent_confirmations (id, action, payload) VALUES ($1, $2, $3::jsonb)", [id, action, JSON.stringify(payload)]); return id; }
 export async function resolveAgentConfirmation(id: string, approved: boolean) { const client = getNeonPool(); if (!client) return null; const result = await client.query<{ action: string; payload: Record<string, unknown> }>("UPDATE agent_confirmations SET status = $2, resolved_at = NOW() WHERE id = $1 AND status = 'pending' RETURNING action, payload", [id, approved ? "approved" : "cancelled"]); return result.rows[0] ?? null; }
 
+/** Verdadeiro quando o dono já confirmou explicitamente a publicação automática no servidor. */
+export async function hasApprovedAutomaticPublication() {
+  const client = getNeonPool(); if (!client) return false;
+  try {
+    const result = await client.query<{ exists: boolean }>("SELECT EXISTS (SELECT 1 FROM agent_confirmations WHERE action = 'publicacao_automatica' AND status = 'approved') AS exists");
+    return Boolean(result.rows[0]?.exists);
+  } catch { return false; }
+}
+
 export async function getCredentialVersion() { const client = getNeonPool(); if (!client) return 1; try { const result = await client.query<{ value: number }>("SELECT (value #>> '{}')::int AS value FROM app_settings WHERE key = 'owner_pwd_version' LIMIT 1"); return Number(result.rows[0]?.value ?? 1); } catch { return 1; } }
 export async function bumpCredentialVersion() { const next = (await getCredentialVersion()) + 1; const client = getNeonPool(); if (!client) return next; await client.query("INSERT INTO app_settings (key, value, updated_at) VALUES ('owner_pwd_version', to_jsonb($1::int), NOW()) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()", [next]); return next; }
+
+/** Versão lida do estado. Estados legados (sem versão) contam como 0. */
+export function stateVersion(value: unknown): number {
+  const raw = (value as { version?: unknown } | null)?.version;
+  return Number.isSafeInteger(raw) && Number(raw) > 0 ? Number(raw) : 0;
+}
+
 export async function getStudioState() { const client = getNeonPool(); if (!client) return null; try { const result = await client.query<{ value: unknown }>("SELECT value FROM app_settings WHERE key = 'studio_state' LIMIT 1"); return result.rows[0]?.value ?? null; } catch { return null; } }
-export async function saveStudioState(value: any, options: { allowPublicationAutomation?: boolean } = {}) { const client = getNeonPool(); if (!client) throw new Error("Neon não configurado para o estado do estúdio."); const current = await getStudioState() as any; if (!options.allowPublicationAutomation && value?.settings?.automation?.publicacao === "Automática" && current?.settings?.automation?.publicacao !== "Automática") throw new Error("Publicação automática só pode ser habilitada após confirmação server-side."); await client.query("INSERT INTO app_settings (key, value, updated_at) VALUES ('studio_state', $1::jsonb, NOW()) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()", [JSON.stringify(value)]); return value; }
-export async function saveStudioNonEditorialState(value: any) { const current = await getStudioState() as any; if (!current) throw new Error("O estado editorial ainda não foi importado para o Neon."); return saveStudioState({ ...current, settings: value?.settings ?? current.settings, adapters: value?.adapters ?? current.adapters, connections: value?.connections ?? current.connections, chat: value?.chat ?? current.chat, audit: value?.audit ?? current.audit }, { allowPublicationAutomation: false }); }
+
+/**
+ * Grava o estado do estúdio com controle otimista de versão.
+ *
+ * - `expectedVersion` informado: a gravação só acontece se a versão no Neon for
+ *   exatamente essa. Caso contrário, lança `StateConflictError` sem gravar nada.
+ * - `expectedVersion` ausente: gravação incondicional (importação explícita),
+ *   sempre incrementando a versão.
+ */
+export async function saveStudioState(value: any, options: { allowPublicationAutomation?: boolean; expectedVersion?: number } = {}) {
+  const client = getNeonPool();
+  if (!client) throw new Error("Neon não configurado para o estado do estúdio.");
+  const current = await getStudioState() as any;
+  const currentVersion = stateVersion(current);
+  if (options.expectedVersion !== undefined && options.expectedVersion !== currentVersion) throw new StateConflictError();
+  if (!options.allowPublicationAutomation && value?.settings?.automation?.publicacao === "Automática" && current?.settings?.automation?.publicacao !== "Automática") throw new Error("Publicação automática só pode ser habilitada após confirmação server-side.");
+  const next = { ...value, version: currentVersion + 1 };
+  if (!current) {
+    const inserted = await client.query("INSERT INTO app_settings (key, value, updated_at) VALUES ('studio_state', $1::jsonb, NOW()) ON CONFLICT (key) DO NOTHING", [JSON.stringify(next)]);
+    if (inserted.rowCount === 0) throw new StateConflictError();
+    return next;
+  }
+  const updated = await client.query("UPDATE app_settings SET value = $1::jsonb, updated_at = NOW() WHERE key = 'studio_state' AND COALESCE((value->>'version')::int, 0) = $2", [JSON.stringify(next), currentVersion]);
+  if (updated.rowCount === 0) throw new StateConflictError();
+  return next;
+}
+
+/**
+ * Salva somente as fatias não editoriais (configurações, adaptadores, conexões,
+ * chat e auditoria). Faz nova leitura e nova tentativa em caso de conflito,
+ * porque nunca disputa as fatias que os comandos editoriais alteram.
+ */
+export async function saveStudioNonEditorialState(value: any) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const current = await getStudioState() as any;
+    if (!current) throw new Error("O estado editorial ainda não foi importado para o Neon.");
+    const merged = { ...current, settings: value?.settings ?? current.settings, adapters: value?.adapters ?? current.adapters, connections: value?.connections ?? current.connections, chat: value?.chat ?? current.chat, audit: value?.audit ?? current.audit };
+    try {
+      return await saveStudioState(merged, { allowPublicationAutomation: false, expectedVersion: stateVersion(current) });
+    } catch (error) {
+      if (error instanceof StateConflictError && attempt < 2) continue;
+      throw error;
+    }
+  }
+  throw new StateConflictError();
+}
