@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
-import { canApproveScript, canApproveVideo, canGenerateScript, canRequestVideoAdjustment, canSchedule, canStartRender } from "@shared/workflowPolicy";
+import { canGenerateScript } from "@shared/workflowPolicy";
 import {
   type Adapter,
   type AgentAction,
@@ -17,11 +17,12 @@ import {
   type StudioSettings,
   type Trend,
   type Video,
-  type VideoStage,
   seedState,
 } from "@/data/studio";
 
 export type StudioState = {
+  /** Versão de concorrência controlada pelo servidor (Neon). */
+  version?: number;
   trends: Trend[];
   ideas: Idea[];
   scripts: Script[];
@@ -46,6 +47,9 @@ type StudioActions = {
   requestVideoChanges: (videoId: string) => void;
   scheduleVideo: (videoId: string) => void;
   retryVideo: (videoId: string) => void;
+  publishVideo: (videoId: string) => void;
+  setDemoMode: (enabled: boolean) => void;
+  clearExampleData: () => void;
   addAsset: (asset: Omit<Asset, "id">) => void;
   updateSettings: (patch: Partial<StudioSettings>, actor?: AuditEntry["actor"]) => void;
   setAutomation: (key: keyof StudioSettings["automation"], value: "Automática" | "Manual", actor?: AuditEntry["actor"]) => void;
@@ -76,18 +80,38 @@ function initialState(): StudioState {
   return cloneSeed();
 }
 
+/** Mensagem clara para conflito de concorrência detectado pelo servidor. */
+function isConflict(error: { data?: { code?: string } | null; message: string }) {
+  return error.data?.code === "CONFLICT" || /conflito de concorr/i.test(error.message);
+}
+
 export function StudioProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<StudioState>(initialState);
   const deviceSnapshot = useRef(state);
   const [hydrated, setHydrated] = useState(false);
   const [serverBacked, setServerBacked] = useState(false);
   const stateQuery = trpc.studio.state.useQuery(undefined, { retry: 1, refetchOnWindowFocus: false });
-  const saveState = trpc.studio.saveState.useMutation();
+  const saveState = trpc.studio.saveState.useMutation({
+    onError: error => {
+      if (isConflict(error)) {
+        toast.warning("Outra alteração aconteceu ao mesmo tempo", { description: "Recarreguei o estado do servidor para evitar sobrescrever algo." });
+        void stateQuery.refetch();
+      }
+    },
+  });
   const editorialCommand = trpc.studio.command.useMutation({
     onSuccess: data => setState(data as StudioState),
-    onError: error => toast.error("Operação recusada pelo servidor", { description: `${error.message} Tente de novo.` }),
+    onError: error => {
+      if (isConflict(error)) {
+        toast.error("Conflito: o estado mudou enquanto você agia", { description: "Recarreguei a versão mais recente do Neon. Revise e repita a ação." });
+        void stateQuery.refetch();
+        return;
+      }
+      toast.error("Operação recusada pelo servidor", { description: `${error.message} Tente de novo.` });
+    },
   });
-  const importState = trpc.studio.importState.useMutation({ onSuccess: () => { setState(deviceSnapshot.current); setServerBacked(true); toast.success("Dados deste aparelho importados para o Neon"); }, onError: error => toast.error("Importação indisponível", { description: `${error.message} Tente de novo.` }) });
+  const importState = trpc.studio.importState.useMutation({ onSuccess: data => { setState((data as StudioState) ?? deviceSnapshot.current); setServerBacked(true); toast.success("Dados deste aparelho importados para o Neon"); }, onError: error => toast.error("Importação indisponível", { description: `${error.message} Tente de novo.` }) });
+  const publish = trpc.studio.publish.useMutation();
 
   useEffect(() => {
     if (!stateQuery.isSuccess || hydrated) return;
@@ -159,6 +183,22 @@ Mostre o resultado real de: ${idea.title}.`;
     editorialCommand.mutate({ operation: "retryVideo", videoId });
   };
 
+  const setDemoMode: StudioActions["setDemoMode"] = enabled => {
+    editorialCommand.mutate({ operation: "setDemoMode", enabled });
+  };
+
+  const clearExampleData: StudioActions["clearExampleData"] = () => {
+    editorialCommand.mutate({ operation: "clearExampleData" });
+  };
+
+  /** Autorização de publicação verificada no servidor (Portão 2 + simulado + confirmação). */
+  const publishVideo: StudioActions["publishVideo"] = videoId => {
+    publish.mutate({ videoId }, {
+      onSuccess: result => toast.success("Publicação autorizada", { description: result.message }),
+      onError: error => toast.error("Publicação bloqueada pelo servidor", { description: `${error.message} Tente de novo.` }),
+    });
+  };
+
   const addAsset: StudioActions["addAsset"] = asset => {
     editorialCommand.mutate({ operation: "addAsset", asset });
   };
@@ -217,7 +257,7 @@ Mostre o resultado real de: ${idea.title}.`;
 
   const resetDemo = () => {
     const restored = cloneSeed();
-    const entry: AuditEntry = { id: crypto.randomUUID(), actor: "Você", action: "Demonstração restaurada", target: "Dados locais", at: new Date().toISOString(), detail: "Conjunto local substituído com confirmação" };
+    const entry: AuditEntry = { id: crypto.randomUUID(), actor: "Você", action: "Demonstração restaurada", target: "Dados locais", at: new Date().toISOString(), detail: "Conjunto de exemplo substituído com confirmação" };
     setState({ ...restored, audit: [entry, ...restored.audit] });
     toast.success("Dados de demonstração restaurados");
   };
@@ -225,7 +265,8 @@ Mostre o resultado real de: ${idea.title}.`;
 
   const value = useMemo<StudioContextValue>(() => ({
     ...state, createIdea, updateScript, generateScript, approveScript, requestScriptChanges,
-    startRender, approveVideo, requestVideoChanges, scheduleVideo, retryVideo, addAsset, updateSettings,
+    startRender, approveVideo, requestVideoChanges, scheduleVideo, retryVideo, publishVideo, setDemoMode,
+    clearExampleData, addAsset, updateSettings,
     setAutomation, selectAdapter, requestPlatformConnection, addChat, applyAgentActions, addAudit, resetDemo, importDeviceData,
   }), [state]);
 

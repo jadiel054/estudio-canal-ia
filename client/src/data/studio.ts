@@ -17,7 +17,10 @@ export type VideoStage =
 export type Platform = "youtube" | "tiktok";
 export type Format = "Longo" | "Short" | "Live";
 
-export type Trend = {
+/** Todo item marcado com `example` é dado de demonstração, não dado real. */
+type ExampleFlag = { example?: boolean };
+
+export type Trend = ExampleFlag & {
   id: string;
   title: string;
   source: "Hacker News" | "GitHub" | "dev.to" | "YouTube";
@@ -30,7 +33,7 @@ export type Trend = {
   tags: string[];
 };
 
-export type Idea = {
+export type Idea = ExampleFlag & {
   id: string;
   trendId?: string;
   origin: "Radar" | "Projeto" | "Agente";
@@ -43,7 +46,7 @@ export type Idea = {
   createdAt: string;
 };
 
-export type Script = {
+export type Script = ExampleFlag & {
   id: string;
   ideaId: string;
   version: number;
@@ -53,7 +56,7 @@ export type Script = {
   updatedAt: string;
 };
 
-export type Asset = {
+export type Asset = ExampleFlag & {
   id: string;
   scriptId: string;
   type: "Tela" | "Código" | "Voz" | "Música" | "Legenda";
@@ -62,7 +65,10 @@ export type Asset = {
   status: "Pronto" | "Pendente" | "Verificar";
 };
 
-export type Video = {
+/** `verified: false` significa que a verificação não foi executada (render simulado). */
+export type QaCheck = { label: string; passed: boolean; note: string; verified?: boolean };
+
+export type Video = ExampleFlag & {
   id: string;
   ideaId: string;
   scriptId: string;
@@ -70,22 +76,25 @@ export type Video = {
   format: Format;
   stage: VideoStage;
   duration: string;
-  qa: { label: string; passed: boolean; note: string }[];
+  qa: QaCheck[];
   synthetic: boolean;
+  /** Render simulado: não existe arquivo de vídeo real. */
+  simulated?: boolean;
   scheduledFor?: string;
 };
 
-export type RenderJob = {
+export type RenderJob = ExampleFlag & {
   id: string;
   videoId: string;
-  status: "queued" | "rendering" | "qa" | "succeeded" | "failed";
+  status: "queued" | "rendering" | "qa" | "succeeded" | "failed" | "simulado";
   attempts: number;
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  simulated?: boolean;
 };
 
-export type Adapter = {
+export type Adapter = ExampleFlag & {
   id: string;
   capability: "LLM" | "Voz / TTS" | "Transcrição" | "Render" | "Pesquisa";
   provider: string;
@@ -103,7 +112,7 @@ export type Connection = {
   enabled: boolean;
 };
 
-export type AuditEntry = {
+export type AuditEntry = ExampleFlag & {
   id: string;
   actor: "Você" | "Nexo" | "Sistema";
   action: string;
@@ -112,7 +121,7 @@ export type AuditEntry = {
   detail?: string;
 };
 
-export type ChatMessage = {
+export type ChatMessage = ExampleFlag & {
   id: string;
   sender: "nexo" | "user";
   text: string;
@@ -140,6 +149,8 @@ export type StudioSettings = {
   monthlyCap: number;
   voiceMode: "TTS" | "Sua voz" | "Música + texto";
   autonomy: "Revisão total" | "Amostra";
+  /** Modo demonstração explícito: permite validar o fluxo com render simulado. */
+  demoMode?: boolean;
 };
 
 const now = "Hoje, 00:46";
@@ -161,7 +172,13 @@ export const stageMeta: Record<VideoStage, { label: string; tone: string; next?:
   erro: { label: "Erro", tone: "coral", next: "Tentar de novo" },
 };
 
+/**
+ * Conjunto de demonstração. Tudo aqui é marcado com `example: true` e aparece
+ * com o selo "EXEMPLO" na interface. O botão "Limpar dados de exemplo" remove
+ * exatamente estes itens, sem tocar em nada produzido por fonte real.
+ */
 export const seedState = {
+  version: 1,
   trends: [
     {
       id: "trend-mcp",
@@ -174,6 +191,7 @@ export const seedState = {
       url: "https://modelcontextprotocol.io",
       collectedAt: "há 36 min",
       tags: ["MCP", "Agentes", "TypeScript"],
+      example: true,
     },
     {
       id: "trend-pydantic",
@@ -186,6 +204,7 @@ export const seedState = {
       url: "https://github.com/pydantic/pydantic-ai",
       collectedAt: "há 1h",
       tags: ["Python", "FastAPI", "Pydantic AI"],
+      example: true,
     },
     {
       id: "trend-neon",
@@ -198,6 +217,7 @@ export const seedState = {
       url: "https://neon.tech",
       collectedAt: "há 3h",
       tags: ["Postgres", "Neon", "Arquitetura"],
+      example: true,
     },
   ] satisfies Trend[],
   ideas: [
@@ -212,6 +232,7 @@ export const seedState = {
       keywords: ["MCP", "agente IA", "TypeScript"],
       status: "aguarda_aprov_roteiro",
       createdAt: now,
+      example: true,
     },
     {
       id: "idea-zarith",
@@ -223,6 +244,7 @@ export const seedState = {
       keywords: ["agentes", "produto", "tutorial"],
       status: "aguarda_aprov_video",
       createdAt: "Ontem, 21:10",
+      example: true,
     },
   ] satisfies Idea[],
   scripts: [
@@ -234,6 +256,7 @@ export const seedState = {
       content: `# Gancho — 0:00\n"Um agente que só conversa é interessante. Um agente que usa suas ferramentas e abre um comentário útil no PR muda o jogo."\n\n# Problema — 0:18\nMostre por que funções soltas e prompts gigantes não escalam quando o agente precisa acessar sistemas reais.\n\n# Demonstração real — 1:02\nAbra o projeto. Construa o servidor MCP, registre a ferramenta de análise e rode um PR de exemplo. Mostre também uma falha e como você a depurou.\n\n# Resultado — 6:40\nCompare a revisão manual com o comentário estruturado produzido pelo agente.\n\n# CTA — 7:20\n"O repositório e os próximos cortes estão na descrição. Qual ferramenta o seu agente deveria aprender primeiro?"`,
       status: "Aguardando aprovação",
       updatedAt: "há 12 min",
+      example: true,
     },
     {
       id: "script-zarith",
@@ -243,12 +266,13 @@ export const seedState = {
       content: "Roteiro aprovado. Produção de tela, código e legendas em andamento.",
       status: "Aprovado",
       updatedAt: "ontem",
+      example: true,
     },
   ] satisfies Script[],
   assets: [
-    { id: "asset-1", scriptId: "script-zarith", type: "Tela", label: "Captura: briefing inicial", license: "Original", status: "Pronto" },
-    { id: "asset-2", scriptId: "script-zarith", type: "Código", label: "Demo do fluxo do agente", license: "MIT", status: "Verificar" },
-    { id: "asset-3", scriptId: "script-zarith", type: "Voz", label: "Narração TTS · Piper pt-BR", license: "Open source", status: "Pronto" },
+    { id: "asset-1", scriptId: "script-zarith", type: "Tela", label: "Captura: briefing inicial", license: "Original", status: "Pronto", example: true },
+    { id: "asset-2", scriptId: "script-zarith", type: "Código", label: "Demo do fluxo do agente", license: "MIT", status: "Verificar", example: true },
+    { id: "asset-3", scriptId: "script-zarith", type: "Voz", label: "Narração TTS · Piper pt-BR", license: "Open source", status: "Pronto", example: true },
   ] satisfies Asset[],
   videos: [
     {
@@ -260,22 +284,26 @@ export const seedState = {
       stage: "aguarda_aprov_video",
       duration: "08:24",
       synthetic: false,
+      simulated: true,
       qa: [
-        { label: "Duração e ritmo", passed: true, note: "Dentro da meta de 7–10 min" },
-        { label: "Legenda em PT-BR", passed: true, note: "98% sincronizada" },
-        { label: "Licenças dos assets", passed: false, note: "Confirmar licença do snippet de código" },
-        { label: "Demonstração original", passed: true, note: "Tela e projeto próprios" },
+        { label: "Duração e ritmo", passed: false, verified: false, note: "Não verificado — render simulado" },
+        { label: "Legenda em PT-BR", passed: false, verified: false, note: "Não verificado — render simulado" },
+        { label: "Licenças dos assets", passed: false, verified: false, note: "Não verificado — render simulado" },
+        { label: "Demonstração original", passed: false, verified: false, note: "Não verificado — render simulado" },
       ],
+      example: true,
     },
   ] satisfies Video[],
-  renderJobs: [] satisfies RenderJob[],
+  renderJobs: [
+    { id: "job-zarith", videoId: "video-zarith", status: "simulado", simulated: true, attempts: 1, startedAt: "ontem", finishedAt: "ontem", example: true },
+  ] satisfies RenderJob[],
   adapters: [
-    { id: "adapter-gpt", capability: "LLM", provider: "Manus AI · GPT-5 mini", plan: "Gratuito", active: true, fallback: false, status: "Pronto" },
-    { id: "adapter-groq", capability: "LLM", provider: "Groq", plan: "Gratuito", active: false, fallback: true, status: "Pronto" },
-    { id: "adapter-piper", capability: "Voz / TTS", provider: "Piper pt-BR", plan: "Gratuito", active: true, fallback: false, status: "Pronto" },
-    { id: "adapter-whisper", capability: "Transcrição", provider: "Whisper local", plan: "Gratuito", active: true, fallback: false, status: "Pronto" },
-    { id: "adapter-ffmpeg", capability: "Render", provider: "FFmpeg + GitHub Actions", plan: "Gratuito", active: true, fallback: false, status: "Pronto" },
-    { id: "adapter-radar", capability: "Pesquisa", provider: "HN + GitHub + dev.to", plan: "Gratuito", active: true, fallback: false, status: "Pronto" },
+    { id: "adapter-gpt", capability: "LLM", provider: "Manus AI · GPT-5 mini", plan: "Gratuito", active: true, fallback: false, status: "Pronto", example: true },
+    { id: "adapter-groq", capability: "LLM", provider: "Groq", plan: "Gratuito", active: false, fallback: true, status: "Pronto", example: true },
+    { id: "adapter-piper", capability: "Voz / TTS", provider: "Piper pt-BR", plan: "Gratuito", active: true, fallback: false, status: "Pronto", example: true },
+    { id: "adapter-whisper", capability: "Transcrição", provider: "Whisper local", plan: "Gratuito", active: true, fallback: false, status: "Pronto", example: true },
+    { id: "adapter-ffmpeg", capability: "Render", provider: "FFmpeg + GitHub Actions", plan: "Gratuito", active: true, fallback: false, status: "Pronto", example: true },
+    { id: "adapter-radar", capability: "Pesquisa", provider: "HN + GitHub + dev.to", plan: "Gratuito", active: true, fallback: false, status: "Pronto", example: true },
   ] satisfies Adapter[],
   connections: [
     { platform: "youtube", label: "YouTube", state: "Pronto para conectar", detail: "OAuth com escopos mínimos; uploads ficam bloqueados até aprovação.", enabled: false },
@@ -287,11 +315,12 @@ export const seedState = {
     monthlyCap: 0,
     voiceMode: "TTS",
     autonomy: "Revisão total",
+    demoMode: false,
   } satisfies StudioSettings,
   audit: [
-    { id: "audit-1", actor: "Sistema", action: "QA finalizado", target: "Como construí o Zarith", at: "há 9 min", detail: "1 item para verificar" },
-    { id: "audit-2", actor: "Nexo", action: "Tendência pontuada", target: "MCP Apps", at: "há 36 min", detail: "Score 94/100" },
-    { id: "audit-3", actor: "Você", action: "Pauta criada", target: "MCP que revisa PRs", at: "hoje, 00:14" },
+    { id: "audit-1", actor: "Sistema", action: "Render simulado concluído", target: "Como construí o Zarith", at: "há 9 min", detail: "QA não verificado — dados de exemplo", example: true },
+    { id: "audit-2", actor: "Nexo", action: "Tendência pontuada", target: "MCP Apps", at: "há 36 min", detail: "Score 94/100 (exemplo)", example: true },
+    { id: "audit-3", actor: "Você", action: "Pauta criada", target: "MCP que revisa PRs", at: "hoje, 00:14", example: true },
   ] satisfies AuditEntry[],
   chat: [
     {
@@ -299,6 +328,7 @@ export const seedState = {
       sender: "nexo",
       text: "Boa noite. Encontrei 3 sinais fortes no Radar. O tema de MCP tem a melhor combinação de crescimento, aderência ao nicho e lacuna em PT-BR. Quer que eu transforme isso em um roteiro longo?",
       at: now,
+      example: true,
     },
   ] satisfies ChatMessage[],
 };
