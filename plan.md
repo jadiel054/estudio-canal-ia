@@ -9,11 +9,15 @@ As integrações YouTube e TikTok entrarão como adaptadores: a interface e as r
 ## Arquitetura
 
 - **Aplicação:** React + TypeScript + Wouter no cliente; Express + tRPC no servidor.
-- **Dados:** contratos de domínio e repositório para canais, tendências, pautas, roteiros, assets, vídeos, revisões, publicações, analytics, adaptadores, configurações e auditoria. O modo de demonstração usa armazenamento local versionado; o adaptador Neon será ativado via `DATABASE_URL` protegida e migração SQL versionada.
+- **Dados:** contratos de domínio e repositório para canais, tendências, pautas, roteiros, assets, vídeos, revisões, publicações, analytics, adaptadores, configurações e auditoria. O modo de demonstração usa armazenamento local versionado; o adaptador Neon/Postgres usa `STUDIO_DATABASE_URL` protegida para não conflitar com `DATABASE_URL`, reservada ao adaptador Drizzle/MySQL do template. O esquema é versionado em SQL.
 - **Agente:** `Nexo`, produtor executivo de IA — profissional, objetivo e cuidadoso com qualidade editorial. Um system prompt versionado define o nicho, as duas aprovações humanas, regras anti-conteúdo em massa, requisitos de demonstração real e limites de segurança. O chat oferece ferramentas controladas: consultar fila/status, criar pauta, alterar modo de uma etapa e trocar adaptador. Operações sensíveis retornam pedido de confirmação em vez de executar.
 - **Integrações:** registros de adaptador por função (LLM, TTS, transcrição, pesquisa, render e publicação), prioridade/fallback, status, limite e custo. Nenhuma chave é mostrada, armazenada no cliente ou exposta em logs.
 - **Jobs:** render, radar e QA são modelados como jobs idempotentes com estado, tentativas e erro visível. O MVP simula a execução de forma auditável para validar o fluxo; um endpoint de cron será preparado para coleta diária após o deploy.
 - **Mídia:** assets carregados/registrados incluem tipo, licença, custo e origem. O fluxo de render produz uma prévia e permite exportar o briefing de produção enquanto FFmpeg/Actions ainda não estiver conectado.
+
+## Implantação Vercel
+
+O repositório GitHub `jadiel054/estudio-canal-ia`, branch `main`, é a fonte de deploy. A Vercel usa o entrypoint Express raiz `index.ts` como função e o build Vite em `public/` como assets estáticos; as rotas Express continuam atendendo tRPC, saúde e callback OAuth. A URL Postgres exclusiva do Neon entra como variável criptografada `STUDIO_DATABASE_URL`, nunca em arquivos versionados. A publicação da UI não implica que provedores OAuth/LLM, autenticação Manus ou sincronização completa do domínio tenham sido ativados.
 
 ## Fluxos e estados
 

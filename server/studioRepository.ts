@@ -10,7 +10,7 @@ export type AuditWrite = {
 let pool: Pool | undefined;
 
 function getNeonPool() {
-  const connectionString = process.env.DATABASE_URL;
+  const connectionString = process.env.STUDIO_DATABASE_URL;
   if (!connectionString) return undefined;
   if (!pool) {
     pool = new Pool({
@@ -25,8 +25,8 @@ function getNeonPool() {
 
 export function studioPersistenceStatus() {
   return {
-    mode: process.env.DATABASE_URL ? "neon" : "local",
-    detail: process.env.DATABASE_URL
+    mode: process.env.STUDIO_DATABASE_URL ? "neon" : "local",
+    detail: process.env.STUDIO_DATABASE_URL
       ? "Neon configurado por segredo de ambiente."
       : "Modo local persistente: adicione DATABASE_URL no cofre para sincronizar com Neon.",
   } as const;
