@@ -1,0 +1,55 @@
+import { describe, expect, it } from "vitest";
+import { MAX_STATE_BYTES, parseStudioState, StateTooLargeError } from "./studioStateSchema";
+
+function validState() {
+  return {
+    version: 3,
+    trends: [],
+    ideas: [{ id: "i1", origin: "Projeto", title: "Pauta", format: "Longo", angle: "ângulo", audience: "devs", keywords: [], status: "pesquisa", createdAt: "agora" }],
+    scripts: [{ id: "s1", ideaId: "i1", version: 1, title: "Roteiro", content: "texto", status: "Rascunho", updatedAt: "agora" }],
+    assets: [],
+    videos: [],
+    renderJobs: [],
+    adapters: [],
+    connections: [],
+    settings: { automation: { radar: "Automática", roteiro: "Manual", producao: "Manual", publicacao: "Manual" }, weeklyGoal: { longos: 2, shorts: 4, lives: 1 }, monthlyCap: 0, voiceMode: "TTS", autonomy: "Revisão total" },
+    audit: [],
+    chat: [],
+  };
+}
+
+describe("validação do estado do estúdio", () => {
+  it("aceita um estado bem formado", () => {
+    const parsed = parseStudioState(validState());
+    expect(parsed.ideas).toHaveLength(1);
+    expect(parsed.version).toBe(3);
+  });
+
+  it("rejeita estágio editorial desconhecido em vez de gravar qualquer coisa", () => {
+    const state = validState();
+    state.ideas[0].status = "qualquer_coisa";
+    expect(() => parseStudioState(state)).toThrow(/status/);
+  });
+
+  it("rejeita formato ausente de configurações", () => {
+    const state: any = validState();
+    delete state.settings;
+    expect(() => parseStudioState(state)).toThrow(/settings/);
+  });
+
+  it("rejeita payload acima do limite de tamanho", () => {
+    const state: any = validState();
+    state.scripts[0].content = "x".repeat(MAX_STATE_BYTES + 1);
+    expect(() => parseStudioState(state)).toThrow(StateTooLargeError);
+  });
+
+  it("rejeita valores fora de faixa em configurações", () => {
+    const state: any = validState();
+    state.settings.weeklyGoal.longos = 9999;
+    expect(() => parseStudioState(state)).toThrow(/weeklyGoal/);
+  });
+
+  it("rejeita entrada que não é objeto", () => {
+    expect(() => parseStudioState("estado solto")).toThrow();
+  });
+});
