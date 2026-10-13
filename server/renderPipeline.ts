@@ -4,6 +4,7 @@ import { RENDER_PATHS, signRenderRequest } from "./renderSecurity";
 import { extractScriptVisuals } from "./renderManifest";
 import { getStudioPool, stateVersion } from "./studioRepository";
 import { generateSpeech, getTtsSettings } from "./ttsProvider";
+import { isRenderErrorCode, isRenderOperation, renderFailureSummary, type RenderErrorCode, type RenderOperation } from "./renderObservability";
 
 const OWNER = "jadiel054";
 const REPOSITORY = "estudio-canal-ia";
@@ -160,6 +161,7 @@ export type RenderQaCheck = { label: string; passed: boolean; verified: true; no
 export type RenderCallback = {
   eventId: string; jobId: string; workflowRunId: number; status: "rendering" | "qa" | "failed"; progress: number;
   message?: string; releaseId?: number; assetId?: number; fileName?: string; fileSizeBytes?: number; durationSeconds?: number; qa?: RenderQaCheck[];
+  errorOperation?: RenderOperation; errorCode?: RenderErrorCode; httpStatus?: number; upstreamStatus?: number;
 };
 
 export function validateRenderCallback(input: unknown): RenderCallback {
@@ -170,6 +172,20 @@ export function validateRenderCallback(input: unknown): RenderCallback {
   if (!(value.status === "rendering" || value.status === "qa" || value.status === "failed")) throw new Error("Status de callback não permitido.");
   if (!Number.isInteger(value.progress) || Number(value.progress) < 0 || Number(value.progress) > 100) throw new Error("Progresso fora do intervalo aceito.");
   const callback: RenderCallback = { eventId: value.eventId, jobId: value.jobId, workflowRunId: Number(value.workflowRunId), status: value.status, progress: Number(value.progress), ...(typeof value.message === "string" ? { message: value.message.slice(0, 400) } : {}) };
+  const hasDiagnostics = value.errorOperation !== undefined || value.errorCode !== undefined || value.httpStatus !== undefined || value.upstreamStatus !== undefined;
+  if (value.status === "failed") {
+    if (value.errorOperation !== undefined && !isRenderOperation(value.errorOperation)) throw new Error("Operação de diagnóstico inválida.");
+    if (value.errorCode !== undefined && !isRenderErrorCode(value.errorCode)) throw new Error("Código de diagnóstico inválido.");
+    for (const key of ["httpStatus", "upstreamStatus"] as const) {
+      if (value[key] !== undefined && (!Number.isInteger(value[key]) || Number(value[key]) < 100 || Number(value[key]) > 599)) throw new Error("Status HTTP de diagnóstico inválido.");
+    }
+    callback.errorOperation = isRenderOperation(value.errorOperation) ? value.errorOperation : "worker";
+    callback.errorCode = isRenderErrorCode(value.errorCode) ? value.errorCode : "render_failed";
+    if (value.httpStatus !== undefined) callback.httpStatus = Number(value.httpStatus);
+    if (value.upstreamStatus !== undefined) callback.upstreamStatus = Number(value.upstreamStatus);
+  } else if (hasDiagnostics) {
+    throw new Error("Diagnóstico só é permitido em callbacks de falha.");
+  }
   if (value.status === "qa") {
     for (const key of ["releaseId", "assetId", "fileSizeBytes"]) if (!Number.isSafeInteger(value[key]) || Number(value[key]) < 1) throw new Error(`Campo ${key} ausente ou inválido no callback de QA.`);
     if (typeof value.durationSeconds !== "number" || !Number.isFinite(value.durationSeconds) || value.durationSeconds <= 0) throw new Error("Campo durationSeconds ausente ou inválido no callback de QA.");
@@ -230,11 +246,12 @@ export async function processRenderCallback(rawInput: unknown) {
       } else {
         finalStatus = "failed"; failedReason = "QA verificável reprovou um ou mais checks; o Portão 2 permanece bloqueado."; video.stage = "erro"; idea.status = "erro"; video.qa = callback.qa;
         storedJob.status = "failed"; storedJob.error = failedReason; storedJob.progress = callback.progress; storedJob.workflowRunId = callback.workflowRunId; storedJob.releaseId = callback.releaseId; storedJob.assetId = callback.assetId; storedJob.fileName = callback.fileName; storedJob.fileSizeBytes = callback.fileSizeBytes; storedJob.durationSeconds = callback.durationSeconds; storedJob.finishedAt = now;
+        storedJob.errorCode = "qa_failed"; storedJob.errorOperation = "qa";
         await connection.query("UPDATE studio_render_jobs SET status = 'failed', progress = $2, workflow_run_id = $3, release_id = $4, asset_id = $5, file_name = $6, file_size_bytes = $7, duration_seconds = $8, qa = $9::jsonb, error_code = 'qa_failed', error_message = $10, finished_at = NOW(), updated_at = NOW() WHERE id = $1::uuid", [callback.jobId, callback.progress, callback.workflowRunId, callback.releaseId, callback.assetId, callback.fileName, callback.fileSizeBytes, callback.durationSeconds, JSON.stringify(callback.qa), failedReason]);
       }
     } else if (callback.status === "failed") {
-      finalStatus = "failed"; failedReason = callback.message || "O worker de render falhou."; video.stage = "erro"; idea.status = "erro"; storedJob.status = "failed"; storedJob.error = failedReason; storedJob.errorCode = "render_failed"; storedJob.finishedAt = now; storedJob.progress = callback.progress; storedJob.workflowRunId = callback.workflowRunId;
-      await connection.query("UPDATE studio_render_jobs SET status = 'failed', progress = $2, workflow_run_id = $3, error_code = 'render_failed', error_message = $4, finished_at = NOW(), updated_at = NOW() WHERE id = $1::uuid", [callback.jobId, callback.progress, callback.workflowRunId, failedReason.slice(0, 400)]);
+      finalStatus = "failed"; failedReason = renderFailureSummary({ operation: callback.errorOperation, errorCode: callback.errorCode, httpStatus: callback.httpStatus, upstreamStatus: callback.upstreamStatus }); video.stage = "erro"; idea.status = "erro"; storedJob.status = "failed"; storedJob.error = failedReason; storedJob.errorCode = callback.errorCode ?? "render_failed"; storedJob.errorOperation = callback.errorOperation ?? "worker"; storedJob.httpStatus = callback.httpStatus; storedJob.upstreamStatus = callback.upstreamStatus; storedJob.finishedAt = now; storedJob.progress = callback.progress; storedJob.workflowRunId = callback.workflowRunId;
+      await connection.query("UPDATE studio_render_jobs SET status = 'failed', progress = $2, workflow_run_id = $3, error_code = $4, error_message = $5, finished_at = NOW(), updated_at = NOW() WHERE id = $1::uuid", [callback.jobId, callback.progress, callback.workflowRunId, storedJob.errorCode, failedReason]);
     } else {
       if (job.status === "failed") throw new Error("Job falhado não pode voltar a executar sem uma nova tentativa aprovada.");
       finalStatus = "rendering"; video.stage = "render"; storedJob.status = "rendering"; storedJob.progress = callback.progress; storedJob.workflowRunId = callback.workflowRunId;
@@ -244,7 +261,7 @@ export async function processRenderCallback(rawInput: unknown) {
     const oldVersion = stateVersion(state); state.version = oldVersion + 1;
     const saved = await connection.query("UPDATE app_settings SET value = $1::jsonb, updated_at = NOW() WHERE key = 'studio_state' AND COALESCE((value->>'version')::int, 0) = $2", [JSON.stringify(state), oldVersion]);
     if (saved.rowCount !== 1) throw new Error("Conflito de versão ao atualizar o status do render.");
-    await connection.query("INSERT INTO audit_log (actor, action, target, details) VALUES ('Sistema', $1, $2, $3::jsonb)", [`Render ${finalStatus}`, idea.title, JSON.stringify({ jobId: callback.jobId, workflowRunId: callback.workflowRunId, progress: callback.progress })]);
+    await connection.query("INSERT INTO audit_log (actor, action, target, details) VALUES ('Sistema', $1, $2, $3::jsonb)", [`Render ${finalStatus}`, idea.title, JSON.stringify({ jobId: callback.jobId, workflowRunId: callback.workflowRunId, progress: callback.progress, ...(finalStatus === "failed" ? { operation: storedJob.errorOperation ?? "worker", errorCode: storedJob.errorCode ?? "render_failed", httpStatus: storedJob.httpStatus, upstreamStatus: storedJob.upstreamStatus } : {}) })]);
     await connection.query("COMMIT"); return { duplicate: false, jobId: callback.jobId, status: finalStatus, progress: callback.progress };
   } catch (error) { await connection.query("ROLLBACK"); throw error; }
   finally { connection.release(); }

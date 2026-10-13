@@ -37,7 +37,7 @@ const TIMEOUT_MS = 45_000;
 const MAX_TEXT_CHARS = 2_000;
 const EXPECTED_SAMPLE_RATE = 24_000;
 
-type TtsFailureKind = "invalid_key" | "unavailable" | "invalid_audio" | "network";
+type TtsFailureKind = "invalid_key" | "unavailable" | "invalid_audio" | "network" | "timeout";
 
 export class TtsProviderError extends Error {
   constructor(message: string, readonly status?: number, readonly kind: TtsFailureKind = "unavailable") {
@@ -234,7 +234,7 @@ async function generateWithModel(text: string, model: TtsModel, voice: typeof TT
     return audio;
   } catch (error) {
     if (error instanceof TtsProviderError) throw error;
-    if (error instanceof Error && error.name === "AbortError") throw new TtsProviderError("Tempo limite do Gemini TTS excedido.", undefined, "network");
+    if (error instanceof Error && error.name === "AbortError") throw new TtsProviderError("Tempo limite do Gemini TTS excedido.", undefined, "timeout");
     throw new TtsProviderError("Falha de rede ao gerar voz no Gemini TTS.", undefined, "network");
   } finally {
     clearTimeout(timer);

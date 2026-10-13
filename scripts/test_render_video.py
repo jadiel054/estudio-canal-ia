@@ -1,8 +1,12 @@
+import io
+import json
 import shutil
 import sys
 import tempfile
 import unittest
+import urllib.error
 import uuid
+from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,6 +31,58 @@ class RenderWorkerTests(unittest.TestCase):
             signature = worker.sign_body(body, "/api/render?op=callback")
         with patch.object(worker.time, "time", return_value=1_900_000_400):
             self.assertFalse(worker.verify_body(body, signature, "/api/render?op=callback"))
+
+    def test_operation_parser_and_safe_error_code_allowlist(self):
+        self.assertEqual(worker.operation_from_path("/api/render?op=voice"), "voice")
+        self.assertEqual(worker.operation_from_path("/api/render?op=token-secret"), "unknown")
+        self.assertEqual(worker.RenderError("falha local", operation="render", error_code="ffmpeg_failed").error_code, "ffmpeg_failed")
+        headers = Message()
+        headers["X-Render-Error-Code"] = "tts_timeout"
+        self.assertEqual(worker.safe_error_code(headers), "tts_timeout")
+        unsafe_headers = Message()
+        unsafe_headers["X-Render-Error-Code"] = "mensagem com segredo"
+        self.assertEqual(worker.safe_error_code(unsafe_headers), "render_http_error")
+
+    def test_http_error_keeps_only_operation_code_and_status(self):
+        headers = Message()
+        headers["X-Render-Error-Code"] = "tts_timeout"
+        headers["X-Render-Upstream-Status"] = "429"
+        private_body = b'{"message":"roteiro confidencial e chave privada"}'
+        response_error = urllib.error.HTTPError(
+            "https://estudio.example/api/render?op=voice", 400, "Bad Request", headers, io.BytesIO(private_body)
+        )
+        with patch.object(worker.urllib.request, "urlopen", side_effect=response_error):
+            with self.assertRaises(worker.RenderError) as caught:
+                worker.post_studio("/api/render?op=voice", b"{}")
+        error = caught.exception
+        self.assertEqual((error.operation, error.error_code, error.http_status, error.upstream_status), ("voice", "tts_timeout", 400, 429))
+        self.assertNotIn("roteiro confidencial", str(error))
+        self.assertNotIn("chave privada", str(error))
+        self.assertEqual(response_error.fp.tell(), 0, "O body da resposta não deve ser lido pelo worker")
+
+    def test_failed_callback_sends_only_safe_diagnostic_fields(self):
+        old_run_id = worker.RUN_ID
+        worker.RUN_ID = 77
+        sent = {}
+        def fake_post(path, body):
+            sent["path"] = path
+            sent["payload"] = json.loads(body)
+            return {"ok": True}, {}
+        try:
+            with patch.object(worker, "post_studio", side_effect=fake_post):
+                worker.callback(
+                    {"jobId": str(uuid.uuid4())}, "failed", 90,
+                    message="roteiro confidencial não deve ser enviado",
+                    diagnostic=worker.RenderError("mensagem privada", operation="voice", error_code="tts_timeout", http_status=400),
+                )
+        finally:
+            worker.RUN_ID = old_run_id
+        payload = sent["payload"]
+        self.assertEqual(sent["path"], "/api/render?op=callback")
+        self.assertEqual((payload["errorOperation"], payload["errorCode"], payload["httpStatus"]), ("voice", "tts_timeout", 400))
+        self.assertNotIn("message", payload)
+        self.assertNotIn("roteiro confidencial", json.dumps(payload))
+        self.assertNotIn("mensagem privada", json.dumps(payload))
 
     def test_srt_timestamp_and_cue_output(self):
         self.assertEqual(worker.srt_time(61.25), "00:01:01,250")

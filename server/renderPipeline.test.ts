@@ -30,4 +30,23 @@ describe("callback do render real", () => {
     expect(() => validateRenderCallback({ ...base, fileName: "../../video.mp4" })).toThrow("Nome de MP4");
     expect(() => validateRenderCallback({ ...base, fileSizeBytes: 2_000_000_001 })).toThrow("limites permitidos");
   });
+
+  it("aceita operação, código e status numéricos em falha e não usa a mensagem livre como diagnóstico", () => {
+    const failed = validateRenderCallback({
+      eventId, jobId, workflowRunId: 77, status: "failed", progress: 90,
+      errorOperation: "voice", errorCode: "tts_timeout", httpStatus: 400, upstreamStatus: 429,
+      message: "conteúdo editorial secreto não deve ser exibido",
+    });
+    expect(failed).toMatchObject({
+      errorOperation: "voice", errorCode: "tts_timeout", httpStatus: 400, upstreamStatus: 429,
+    });
+  });
+
+  it("rejeita códigos livres, operações desconhecidas e status fora do intervalo", () => {
+    const failed = { eventId, jobId, workflowRunId: 77, status: "failed", progress: 90 };
+    expect(() => validateRenderCallback({ ...failed, errorCode: "texto secreto" })).toThrow("Código de diagnóstico");
+    expect(() => validateRenderCallback({ ...failed, errorOperation: "token-secreto" })).toThrow("Operação de diagnóstico");
+    expect(() => validateRenderCallback({ ...failed, httpStatus: 99 })).toThrow("Status HTTP");
+    expect(() => validateRenderCallback({ ...base, errorCode: "tts_timeout" })).toThrow("só é permitido");
+  });
 });
