@@ -43,6 +43,8 @@ export const ideaSchema = z.object({
   angle: shortText(2000),
   audience: shortText(300),
   keywords: z.array(shortText(60)).max(20),
+  sourceNotes: shortText(5000).optional(),
+  captureUrls: z.array(z.string().url().max(900)).max(10).optional(),
   status: stageSchema,
   createdAt: shortText(80),
   example: z.boolean().optional(),
@@ -56,6 +58,16 @@ export const scriptSchema = z.object({
   content: z.string().max(100_000),
   status: z.enum(["Rascunho", "Aguardando aprovação", "Aprovado", "Ajuste pedido"]),
   updatedAt: shortText(80),
+  qa: z.object({
+    status: z.enum(["revisar", "atenção"]),
+    estimatedDurationMinutes: z.number().min(0).max(240),
+    technicalFlags: z.array(z.object({ excerpt: shortText(180), reason: shortText(300) })).max(8),
+    repetitionFlags: z.array(z.object({ excerpt: shortText(180), reason: shortText(300) })).max(8),
+    policyTerms: z.array(z.object({ term: shortText(120), context: shortText(300) })).max(8),
+    originality: z.object({ demoRequired: z.literal(true), demoSpecified: z.boolean(), evidence: shortText(300), genericContentRisk: z.enum(["baixo", "médio", "alto"]) }),
+    summary: shortText(500),
+    classifier: z.enum(["llm", "heuristic"]),
+  }).optional(),
   example: z.boolean().optional(),
 });
 

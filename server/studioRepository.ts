@@ -256,3 +256,83 @@ export async function saveStudioNonEditorialState(value: any) {
   }
   throw new StateConflictError();
 }
+
+
+// --- Radar real: sinais e observações são isolados do estado editorial. ---
+export type RadarRunWrite = {
+  id: string;
+  startedAt: Date;
+  finishedAt: Date;
+  trigger: "manual" | "cron";
+  sources: Array<{ source: string; ok: boolean; count: number; error?: string }>;
+  classified: number;
+};
+
+export async function getRadarBaselines(signalKeys: string[]): Promise<Map<string, { metric: number; observedAt: string }>> {
+  const client = getNeonPool();
+  if (!client) throw new Error("Neon indisponível: o Radar real precisa do banco configurado.");
+  if (!signalKeys.length) return new Map();
+  const result = await client.query<{ signal_key: string; metric: number; observed_at: Date }>(
+    "SELECT DISTINCT ON (signal_key) signal_key, metric, observed_at FROM radar_observations WHERE signal_key = ANY($1::text[]) ORDER BY signal_key, observed_at DESC",
+    [signalKeys],
+  );
+  return new Map(result.rows.map(row => [row.signal_key, { metric: Number(row.metric), observedAt: new Date(row.observed_at).toISOString() }]));
+}
+
+export async function persistRadarBatch(signals: Array<Record<string, any> & { observedMetric: number }>, run: RadarRunWrite) {
+  const pool = getNeonPool();
+  if (!pool) throw new Error("Neon indisponível: o Radar real precisa do banco configurado.");
+  const connection = await pool.connect();
+  try {
+    await connection.query("BEGIN");
+    for (const signal of signals) {
+      const signalKey = `${signal.source}:${signal.externalId}`;
+      await connection.query(
+        `INSERT INTO radar_signals (signal_key, source, title, url, score, collected_at, payload)
+         VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::jsonb)
+         ON CONFLICT (signal_key) DO UPDATE SET source = EXCLUDED.source, title = EXCLUDED.title, url = EXCLUDED.url, score = EXCLUDED.score, collected_at = EXCLUDED.collected_at, payload = EXCLUDED.payload`,
+        [signalKey, signal.source, signal.title, signal.url, signal.score, signal.collectedAt, JSON.stringify(signal)],
+      );
+      await connection.query(
+        "INSERT INTO radar_observations (signal_key, observed_at, metric) VALUES ($1, $2::timestamptz, $3)",
+        [signalKey, signal.collectedAt, signal.observedMetric],
+      );
+    }
+    await connection.query(
+      "INSERT INTO radar_runs (id, started_at, finished_at, trigger, sources, classified) VALUES ($1, $2, $3, $4, $5::jsonb, $6)",
+      [run.id, run.startedAt, run.finishedAt, run.trigger, JSON.stringify(run.sources), run.classified],
+    );
+    await connection.query("COMMIT");
+    return { persisted: true as const, count: signals.length };
+  } catch (error) {
+    await connection.query("ROLLBACK");
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+export async function recordRadarRun(run: RadarRunWrite) {
+  const client = getNeonPool();
+  if (!client) throw new Error("Neon indisponível: o Radar real precisa do banco configurado.");
+  await client.query(
+    "INSERT INTO radar_runs (id, started_at, finished_at, trigger, sources, classified) VALUES ($1, $2, $3, $4, $5::jsonb, $6)",
+    [run.id, run.startedAt, run.finishedAt, run.trigger, JSON.stringify(run.sources), run.classified],
+  );
+}
+
+export async function readRadarSignals(days = 21): Promise<{ signals: any[]; sources: any[]; lastRun: any | null; persisted: boolean }> {
+  const client = getNeonPool();
+  if (!client) return { signals: [], sources: [], lastRun: null, persisted: false };
+  const [signals, runs] = await Promise.all([
+    client.query<{ payload: Record<string, unknown> }>("SELECT payload FROM radar_signals WHERE collected_at >= NOW() - ($1::int * INTERVAL '1 day') ORDER BY score DESC, collected_at DESC LIMIT 150", [days]),
+    client.query<{ id: string; started_at: Date; finished_at: Date; trigger: string; sources: any; classified: number }>("SELECT id, started_at, finished_at, trigger, sources, classified FROM radar_runs ORDER BY finished_at DESC LIMIT 1"),
+  ]);
+  const latest = runs.rows[0];
+  return {
+    signals: signals.rows.map(row => row.payload),
+    sources: latest?.sources ?? [],
+    lastRun: latest ? { id: latest.id, startedAt: new Date(latest.started_at).toISOString(), finishedAt: new Date(latest.finished_at).toISOString(), trigger: latest.trigger, classified: Number(latest.classified) } : null,
+    persisted: true,
+  };
+}

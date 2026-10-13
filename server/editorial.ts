@@ -5,7 +5,7 @@ import { appendStudioAudit, getStudioState, saveStudioState, stateVersion } from
 export type EditorialActor = "Você" | "Nexo" | "Sistema";
 
 export type EditorialCommand =
-  | { operation: "createIdea"; title: string; format: "Longo" | "Short" | "Live"; origin?: "Radar" | "Projeto" | "Agente"; trendId?: string; angle?: string }
+  | { operation: "createIdea"; title: string; format: "Longo" | "Short" | "Live"; origin?: "Radar" | "Projeto" | "Agente"; trendId?: string; angle?: string; sourceNotes?: string; captureUrls?: string[] }
   | { operation: "updateScript"; scriptId: string; content: string }
   | { operation: "generateScript"; ideaId: string; content: string }
   | { operation: "approveScript"; ideaId: string }
@@ -28,7 +28,7 @@ function audit(state: any, actor: EditorialActor, action: string, target: string
 
 function isDemoMode(state: any) { return state?.settings?.demoMode === true; }
 
-export async function executeEditorialCommand(command: EditorialCommand, context: { actor: EditorialActor } = { actor: "Você" }) {
+export async function executeEditorialCommand(command: EditorialCommand, context: { actor: EditorialActor; qa?: unknown } = { actor: "Você" }) {
   const actor = context.actor;
   const state = await getStudioState() as any;
   if (!state) fail("O estado do estúdio ainda não foi importado para o Neon.");
@@ -38,7 +38,7 @@ export async function executeEditorialCommand(command: EditorialCommand, context
   let target = "Estúdio";
   switch (command.operation) {
     case "createIdea": {
-      const idea = { id: randomUUID(), title: command.title.trim(), format: command.format, trendId: command.trendId, origin: command.origin ?? (command.trendId ? "Radar" : "Projeto"), angle: command.angle ?? "Tutorial com demonstração real, decisão técnica e resultado mensurável.", audience: "Devs que constroem com IA", keywords: ["programação", "agentes IA", command.format.toLowerCase()], status: "pesquisa", createdAt: now };
+      const idea = { id: randomUUID(), title: command.title.trim(), format: command.format, trendId: command.trendId, origin: command.origin ?? (command.trendId ? "Radar" : "Projeto"), angle: command.angle ?? "Tutorial com demonstração real, decisão técnica e resultado mensurável.", audience: "Devs que constroem com IA", keywords: ["programação", "agentes IA", command.format.toLowerCase()], sourceNotes: command.sourceNotes, captureUrls: command.captureUrls, status: "pesquisa", createdAt: now };
       state.ideas = [idea, ...(state.ideas ?? [])]; target = idea.title; audit(state, actor, "Pauta criada", target, `Origem: ${idea.origin}`); break;
     }
     case "updateScript": {
@@ -47,6 +47,7 @@ export async function executeEditorialCommand(command: EditorialCommand, context
       const unchanged = script.content === command.content;
       const guard = canEditScript(script.status);
       script.content = command.content; script.updatedAt = now;
+      if (!unchanged) delete script.qa;
       if (guard.requiresReapproval && !unchanged) {
         // Brecha do Portão 1 fechada: editar um roteiro aprovado invalida a aprovação.
         script.version += 1; script.status = "Aguardando aprovação";
@@ -63,10 +64,12 @@ export async function executeEditorialCommand(command: EditorialCommand, context
       let script = state.scripts?.find((item: any) => item.ideaId === command.ideaId);
       if (script) { script.version += 1; script.content = command.content; script.status = "Aguardando aprovação"; script.updatedAt = now; }
       else { script = { id: randomUUID(), ideaId: idea.id, version: 1, title: idea.title, content: command.content, status: "Aguardando aprovação", updatedAt: now }; state.scripts = [script, ...(state.scripts ?? [])]; }
+      if (context.qa) script.qa = context.qa;
       idea.status = "aguarda_aprov_roteiro"; target = idea.title; audit(state, actor, "Roteiro gerado", target, "Aguardando aprovação do Portão 1"); break;
     }
     case "approveScript": {
       const idea = state.ideas?.find((item: any) => item.id === command.ideaId); const script = state.scripts?.find((item: any) => item.ideaId === command.ideaId); if (!idea || !script) fail("Pauta ou roteiro não encontrado.");
+      if (!script.qa) fail("Execute o QA automático do roteiro antes de decidir o Portão 1.");
       const guard = canApproveScript(idea.status, script.status); if (!guard.allowed) fail(guard.reason);
       idea.status = "assets"; script.status = "Aprovado"; script.updatedAt = now; target = idea.title; audit(state, actor, "Portão 1 aprovado", target, "Liberado para assets e produção"); break;
     }

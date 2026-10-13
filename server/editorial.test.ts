@@ -33,7 +33,7 @@ function baseState() {
   return {
     version: 1,
     ideas: [{ id: "idea-1", title: "Pauta", format: "Longo", status: "aguarda_aprov_roteiro" }],
-    scripts: [{ id: "script-1", ideaId: "idea-1", title: "Pauta", status: "Aguardando aprovação", version: 1, content: "texto" }],
+    scripts: [{ id: "script-1", ideaId: "idea-1", title: "Pauta", status: "Aguardando aprovação", version: 1, content: "texto", qa: { classifier: "heuristic", status: "revisar", estimatedDurationMinutes: 2, technicalFlags: [], repetitionFlags: [], policyTerms: [], originality: { demoRequired: true, demoSpecified: false, evidence: "não verificado", genericContentRisk: "alto" }, summary: "revisar manualmente" } }],
     videos: [], assets: [], renderJobs: [], audit: [], chat: [], trends: [], adapters: [], connections: [],
     settings: { automation: { publicacao: "Manual" }, demoMode: false },
   };
@@ -45,6 +45,12 @@ describe("editorial commands", () => {
   it("rejects Portão 1 approval when the server state is not eligible", async () => {
     mocked.state.ideas[0].status = "pesquisa";
     await expect(executeEditorialCommand({ operation: "approveScript", ideaId: "idea-1" })).rejects.toThrow("Portão 1");
+    expect(mocked.saveStudioState).not.toHaveBeenCalled();
+  });
+
+  it("não aprova o Portão 1 quando o roteiro ainda não passou pelo QA", async () => {
+    delete mocked.state.scripts[0].qa;
+    await expect(executeEditorialCommand({ operation: "approveScript", ideaId: "idea-1" })).rejects.toThrow("QA automático");
     expect(mocked.saveStudioState).not.toHaveBeenCalled();
   });
 

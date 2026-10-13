@@ -11,6 +11,8 @@ import { completeWithFallback, getProviderSettings, getProviderUsage, testProvid
 import { authConfigSummary, changeOwnerPassword, clearSessionCookie, invalidateAllSessions, loginOwner } from "./auth";
 import { executeEditorialCommand, type EditorialCommand } from "./editorial";
 import { parseStudioState, StateTooLargeError } from "./studioStateSchema";
+import { getRadarState, refreshRadar } from "./radar";
+import { generateScriptForIdea } from "./scriptPipeline";
 
 async function enforceLLMRateLimit(userId: string) { if (!(await consumeRateLimit(`llm:${userId}`, 20))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Limite de 20 chamadas LLM por minuto atingido. Tente novamente em instantes." }); }
 const taskSchema = z.enum(["roteiro", "qa", "agente", "leve"]);
@@ -25,9 +27,8 @@ const providerPatchSchema = z.object({
   thinkingLevel: z.record(z.string(), thinkingLevelSchema).optional(),
 });
 const editorialCommandSchema = z.discriminatedUnion("operation", [
-  z.object({ operation: z.literal("createIdea"), title: z.string().trim().min(1).max(240), format: z.enum(["Longo", "Short", "Live"]), origin: z.enum(["Radar", "Projeto", "Agente"]).optional(), trendId: z.string().max(120).optional(), angle: z.string().max(1000).optional() }),
+  z.object({ operation: z.literal("createIdea"), title: z.string().trim().min(1).max(240), format: z.enum(["Longo", "Short", "Live"]), origin: z.enum(["Radar", "Projeto", "Agente"]).optional(), trendId: z.string().max(120).optional(), angle: z.string().max(1000).optional(), sourceNotes: z.string().max(5000).optional(), captureUrls: z.array(z.string().url().max(900)).max(10).optional() }),
   z.object({ operation: z.literal("updateScript"), scriptId: z.string().min(1).max(120), content: z.string().min(1).max(100_000) }),
-  z.object({ operation: z.literal("generateScript"), ideaId: z.string().min(1).max(120), content: z.string().min(1).max(100_000) }),
   z.object({ operation: z.literal("approveScript"), ideaId: z.string().min(1).max(120) }),
   z.object({ operation: z.literal("requestScriptChanges"), ideaId: z.string().min(1).max(120) }),
   z.object({ operation: z.literal("startRender"), ideaId: z.string().min(1).max(120) }),
@@ -83,6 +84,17 @@ export const appRouter = router({
     persistence: adminProcedure.query(() => studioPersistenceStatus()),
     verifyPersistence: adminProcedure.mutation(() => verifyStudioDatabase()),
     state: adminProcedure.query(() => getStudioState()),
+    radar: adminProcedure.query(async () => getRadarState()),
+    refreshRadar: adminProcedure.mutation(async ({ ctx }) => {
+      if (!(await consumeRateLimit(`radar-refresh:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "O Radar pode ser atualizado uma vez por minuto. Aguarde e tente novamente." });
+      try { return await refreshRadar("Você", "manual"); }
+      catch (error) { throw new TRPCError({ code: "PRECONDITION_FAILED", message: error instanceof Error ? error.message : "Falha ao atualizar as fontes do Radar. Tente novamente." }); }
+    }),
+    generateScript: adminProcedure.input(z.object({ ideaId: z.string().min(1).max(120) })).mutation(async ({ input, ctx }) => {
+      await enforceLLMRateLimit(ctx.user.id);
+      try { return await generateScriptForIdea(input.ideaId); }
+      catch (error) { throw toTrpcError(error); }
+    }),
     command: adminProcedure.input(editorialCommandSchema).mutation(async ({ input }) => {
       try {
         // O ator vem do contexto autenticado, não de heurística sobre o texto da ação.

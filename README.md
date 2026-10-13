@@ -43,3 +43,7 @@ Vercel está configurada para construir pelo repositório conectado e usar o app
 ## Segurança
 
 O Nexo não exibe chaves. Não publique segredos, tokens ou arquivos `.env`. Use somente as variáveis vazias documentadas em `.env.example` como nomes de referência; cadastre valores reais no cofre de segredos do ambiente.
+
+## Etapa B — Radar real e QA do roteiro
+
+A coleta diária das fontes gratuitas, o score explicável, o cadastro de pautas com notas/referências e o QA server-side do Portão 1 estão descritos em [`docs/progresso/etapa-b-radar.md`](docs/progresso/etapa-b-radar.md). A primeira execução forma a linha de base de crescimento; a análise LLM depende dos provedores já configurados no cofre do ambiente.

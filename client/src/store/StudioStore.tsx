@@ -37,9 +37,9 @@ export type StudioState = {
 };
 
 type StudioActions = {
-  createIdea: (params: Pick<Idea, "title" | "format"> & Partial<Pick<Idea, "trendId" | "origin" | "angle">>) => Idea;
+  createIdea: (params: Pick<Idea, "title" | "format"> & Partial<Pick<Idea, "trendId" | "origin" | "angle" | "sourceNotes" | "captureUrls">>) => Idea;
   updateScript: (id: string, content: string) => void;
-  generateScript: (ideaId: string, generatedContent?: string) => void;
+  generateScript: (ideaId: string) => void;
   approveScript: (ideaId: string) => void;
   requestScriptChanges: (ideaId: string) => void;
   startRender: (ideaId: string) => void;
@@ -62,7 +62,7 @@ type StudioActions = {
   importDeviceData: () => void;
 };
 
-type StudioContextValue = StudioState & StudioActions;
+type StudioContextValue = StudioState & StudioActions & { isGeneratingScript: boolean };
 const StudioContext = createContext<StudioContextValue | null>(null);
 const storageKey = "estudio-canal-ia-v1";
 
@@ -110,6 +110,13 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       toast.error("Operação recusada pelo servidor", { description: `${error.message} Tente de novo.` });
     },
   });
+  const generateScriptRequest = trpc.studio.generateScript.useMutation({
+    onSuccess: data => {
+      setState(data.state as StudioState);
+      toast.success(`Roteiro e QA gerados por ${data.provider === "gemini" ? "Gemini" : "Groq"}`, { description: data.qaProvider === "heuristic" ? "QA LLM indisponível: aplicamos verificações locais limitadas; revise tudo manualmente." : `QA executado por ${data.qaProvider === "gemini" ? "Gemini" : "Groq"}; Portão 1 continua exigindo sua revisão.` });
+    },
+    onError: error => toast.error("Não foi possível gerar roteiro e QA", { description: `${error.message} Tente novamente.` }),
+  });
   const importState = trpc.studio.importState.useMutation({ onSuccess: data => { setState((data as StudioState) ?? deviceSnapshot.current); setServerBacked(true); toast.success("Dados deste aparelho importados para o Neon"); }, onError: error => toast.error("Importação indisponível", { description: `${error.message} Tente de novo.` }) });
   const publish = trpc.studio.publish.useMutation();
 
@@ -136,8 +143,8 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   };
 
   const createIdea: StudioActions["createIdea"] = params => {
-    const idea: Idea = { id: crypto.randomUUID(), title: params.title, format: params.format, trendId: params.trendId, origin: params.origin ?? (params.trendId ? "Radar" : "Projeto"), angle: params.angle ?? "Tutorial com demonstração real, decisão técnica e resultado mensurável.", audience: "Devs que constroem com IA", keywords: ["programação", "agentes IA", params.format.toLowerCase()], status: "pesquisa", createdAt: new Date().toISOString() };
-    editorialCommand.mutate({ operation: "createIdea", title: params.title, format: params.format, origin: idea.origin, trendId: params.trendId, angle: idea.angle });
+    const idea: Idea = { id: crypto.randomUUID(), title: params.title, format: params.format, trendId: params.trendId, origin: params.origin ?? (params.trendId ? "Radar" : "Projeto"), angle: params.angle ?? "Tutorial com demonstração real, decisão técnica e resultado mensurável.", audience: "Devs que constroem com IA", keywords: ["programação", "agentes IA", params.format.toLowerCase()], sourceNotes: params.sourceNotes, captureUrls: params.captureUrls, status: "pesquisa", createdAt: new Date().toISOString() };
+    editorialCommand.mutate({ operation: "createIdea", title: params.title, format: params.format, origin: idea.origin, trendId: params.trendId, angle: idea.angle, sourceNotes: params.sourceNotes, captureUrls: params.captureUrls });
     return idea;
   };
 
@@ -145,14 +152,12 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     editorialCommand.mutate({ operation: "updateScript", scriptId: id, content });
   };
 
-  const generateScript: StudioActions["generateScript"] = (ideaId, generatedContent) => {
+  const generateScript: StudioActions["generateScript"] = ideaId => {
     const idea = state.ideas.find(item => item.id === ideaId);
     if (!idea) return toast.error("Pauta não encontrada");
     const guard = canGenerateScript(idea.status);
     if (!guard.allowed) return toast.error("Geração de roteiro bloqueada", { description: guard.reason });
-    const content = generatedContent ?? `# Gancho — 0:00
-Mostre o resultado real de: ${idea.title}.`;
-    editorialCommand.mutate({ operation: "generateScript", ideaId, content });
+    generateScriptRequest.mutate({ ideaId });
   };
 
   const approveScript: StudioActions["approveScript"] = ideaId => {
@@ -265,10 +270,11 @@ Mostre o resultado real de: ${idea.title}.`;
 
   const value = useMemo<StudioContextValue>(() => ({
     ...state, createIdea, updateScript, generateScript, approveScript, requestScriptChanges,
+    isGeneratingScript: generateScriptRequest.isPending,
     startRender, approveVideo, requestVideoChanges, scheduleVideo, retryVideo, publishVideo, setDemoMode,
     clearExampleData, addAsset, updateSettings,
     setAutomation, selectAdapter, requestPlatformConnection, addChat, applyAgentActions, addAudit, resetDemo, importDeviceData,
-  }), [state]);
+  }), [state, generateScriptRequest.isPending]);
 
   return <StudioContext.Provider value={value}>{children}</StudioContext.Provider>;
 }

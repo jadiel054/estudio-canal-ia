@@ -31,6 +31,8 @@ export type Trend = ExampleFlag & {
   url: string;
   collectedAt: string;
   tags: string[];
+  classifier?: "llm" | "heuristic";
+  angle?: string;
 };
 
 export type Idea = ExampleFlag & {
@@ -42,6 +44,8 @@ export type Idea = ExampleFlag & {
   angle: string;
   audience: string;
   keywords: string[];
+  sourceNotes?: string;
+  captureUrls?: string[];
   status: VideoStage;
   createdAt: string;
 };
@@ -54,6 +58,16 @@ export type Script = ExampleFlag & {
   content: string;
   status: "Rascunho" | "Aguardando aprovação" | "Aprovado" | "Ajuste pedido";
   updatedAt: string;
+  qa?: {
+    status: "revisar" | "atenção";
+    estimatedDurationMinutes: number;
+    technicalFlags: Array<{ excerpt: string; reason: string }>;
+    repetitionFlags: Array<{ excerpt: string; reason: string }>;
+    policyTerms: Array<{ term: string; context: string }>;
+    originality: { demoRequired: true; demoSpecified: boolean; evidence: string; genericContentRisk: "baixo" | "médio" | "alto" };
+    summary: string;
+    classifier: "llm" | "heuristic";
+  };
 };
 
 export type Asset = ExampleFlag & {
