@@ -2,10 +2,12 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
 import Workspace from "@/pages/Workspace";
+import LoginPage from "@/pages/Login";
 import { StudioProvider } from "@/store/StudioStore";
 import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
+import { useAuth } from "./_core/hooks/useAuth";
 
 function Router() {
   return <Switch>
@@ -28,5 +30,12 @@ function Router() {
 }
 
 export default function App() {
-  return <ErrorBoundary><ThemeProvider defaultTheme="dark"><TooltipProvider><StudioProvider><Toaster richColors position="top-center" /><Router /></StudioProvider></TooltipProvider></ThemeProvider></ErrorBoundary>;
+  return <ErrorBoundary><ThemeProvider defaultTheme="dark"><TooltipProvider><AuthGate /></TooltipProvider></ThemeProvider></ErrorBoundary>;
+}
+
+function AuthGate() {
+  const auth = useAuth();
+  if (auth.loading) return <main className="grid min-h-screen place-items-center bg-[#090d17] text-sm text-[#9ba7bd]">Verificando sessão…</main>;
+  if (!auth.isAuthenticated) return <LoginPage />;
+  return <StudioProvider><Toaster richColors position="top-center" /><Router /></StudioProvider>;
 }

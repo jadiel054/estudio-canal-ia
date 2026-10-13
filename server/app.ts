@@ -2,7 +2,6 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import express, { type Express } from "express";
 import { appRouter } from "./routers";
 import { createContext } from "./_core/context";
-import { registerOAuthRoutes } from "./_core/oauth";
 import { publicPlatformScript } from "./_core/publicConfig";
 import { studioPersistenceStatus, verifyStudioDatabase } from "./studioRepository";
 
@@ -42,7 +41,6 @@ export function registerApiRoutes(app: Express) {
     res.set("Cache-Control", "no-store").type("application/javascript").send(publicPlatformScript());
   });
 
-  registerOAuthRoutes(app);
   app.use(
     "/api/trpc",
     createExpressMiddleware({

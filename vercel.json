@@ -4,5 +4,6 @@
   "buildCommand": "pnpm run build",
   "installCommand": "pnpm install --frozen-lockfile",
   "outputDirectory": "public",
+  "functions": { "api/**/*.js": { "maxDuration": 50 } },
   "rewrites": [{ "source": "/((?!api/).*)", "destination": "/index.html" }]
 }
