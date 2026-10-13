@@ -126,3 +126,23 @@ export async function getLLMUsageSummary() {
     return empty;
   }
 }
+
+export async function getStudioQueueSummary() {
+  const client = getNeonPool();
+  if (!client) return { persisted: false as const, ideas: {}, videos: {}, jobs: {} };
+  try {
+    const [ideas, videos, jobs] = await Promise.all([
+      client.query<{ status: string; count: string }>("SELECT status, count(*)::text AS count FROM ideas GROUP BY status"),
+      client.query<{ state: string; count: string }>("SELECT state, count(*)::text AS count FROM videos GROUP BY state"),
+      client.query<{ status: string; count: string }>("SELECT status, count(*)::text AS count FROM render_jobs GROUP BY status"),
+    ]);
+    return {
+      persisted: true as const,
+      ideas: Object.fromEntries(ideas.rows.map(row => [row.status, Number(row.count)])),
+      videos: Object.fromEntries(videos.rows.map(row => [row.state, Number(row.count)])),
+      jobs: Object.fromEntries(jobs.rows.map(row => [row.status, Number(row.count)])),
+    };
+  } catch {
+    return { persisted: false as const, ideas: {}, videos: {}, jobs: {} };
+  }
+}

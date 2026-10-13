@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { appendStudioAudit, studioPersistenceStatus } from "../studioRepository";
+import { appendStudioAudit, getStudioQueueSummary, studioPersistenceStatus } from "../studioRepository";
 import { getRawProviderSettings, updateProviderSettings } from "../llmProviders";
 import type { AgentAction } from "../../client/src/data/studio";
 
@@ -26,7 +26,7 @@ export async function executeAgentTool(name: string, rawArgs: Record<string, unk
   const parsed = schemas[name as keyof typeof schemas].safeParse(rawArgs);
   if (!parsed.success) return { summary: "Parâmetros inválidos; nenhuma alteração foi feita.", actions: [] };
   const args = parsed.data as any;
-  if (name === "consultar_fila") { await appendStudioAudit({ actor: "Nexo", action: "Fila consultada por ferramenta", target: "fila", details: {} }); return { summary: `Fila consultada. ${studioPersistenceStatus().detail}`, actions: [] }; }
+  if (name === "consultar_fila") { const queue = await getStudioQueueSummary(); await appendStudioAudit({ actor: "Nexo", action: "Fila consultada por ferramenta", target: "fila", details: queue }); return { summary: queue.persisted ? `Fila consultada no Neon: ideias ${JSON.stringify(queue.ideas)}, vídeos ${JSON.stringify(queue.videos)}, jobs ${JSON.stringify(queue.jobs)}.` : `Fila indisponível no Neon. ${studioPersistenceStatus().detail}`, actions: [] }; }
   if (name === "alterar_automacao") {
     const action = { type: "setAutomation" as const, key: args.etapa, value: args.modo }; await appendStudioAudit({ actor: "Nexo", action: "Automação atualizada por ferramenta", target: args.etapa, details: { value: args.modo } }); return { summary: `A etapa ${args.etapa} foi alterada para ${args.modo} e registrada no log.`, actions: [action] };
   }
