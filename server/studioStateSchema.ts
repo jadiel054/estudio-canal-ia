@@ -78,6 +78,14 @@ export const assetSchema = z.object({
   label: shortText(300),
   license: shortText(300),
   status: z.enum(["Pronto", "Pendente", "Verificar"]),
+  fileName: shortText(240).optional(),
+  contentType: shortText(120).optional(),
+  sizeBytes: z.number().int().positive().max(100_000_000).optional(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  githubReleaseId: z.number().int().positive().optional(),
+  githubAssetId: z.number().int().positive().optional(),
+  inputAssetId: z.string().uuid().optional(),
+  scriptVersion: z.number().int().positive().optional(),
   example: z.boolean().optional(),
 });
 
@@ -101,6 +109,13 @@ export const videoSchema = z.object({
   synthetic: z.boolean(),
   /** Vídeo produzido por render simulado (sem arquivo real). */
   simulated: z.boolean().optional(),
+  renderJobId: z.string().uuid().optional(),
+  releaseId: z.number().int().positive().optional(),
+  assetId: z.number().int().positive().optional(),
+  fileName: shortText(240).optional(),
+  fileSizeBytes: z.number().int().positive().max(2_147_483_647).optional(),
+  finalAssetExpiresAt: shortText(80).optional(),
+  cleanupRequestedAt: shortText(80).optional(),
   scheduledFor: shortText(120).optional(),
   example: z.boolean().optional(),
 });
@@ -110,10 +125,19 @@ export const renderJobSchema = z.object({
   videoId: id,
   status: z.enum(["queued", "rendering", "qa", "succeeded", "failed", "simulado"]),
   attempts: z.number().int().min(0).max(10_000),
+  progress: z.number().int().min(0).max(100).optional(),
   startedAt: shortText(80).optional(),
   finishedAt: shortText(80).optional(),
   error: shortText(500).optional(),
+  errorCode: shortText(100).optional(),
   simulated: z.boolean().optional(),
+  workflowRunId: z.number().int().positive().optional(),
+  releaseId: z.number().int().positive().optional(),
+  assetId: z.number().int().positive().optional(),
+  fileName: shortText(240).optional(),
+  fileSizeBytes: z.number().int().positive().max(2_147_483_647).optional(),
+  durationSeconds: z.number().min(0).max(86_400).optional(),
+  expiresAt: shortText(80).optional(),
 });
 
 export const adapterSchema = z.object({

@@ -1,6 +1,6 @@
 # Etapa C — plano de produção real de vídeo
 
-**Estado:** planejamento e primeira fundação de segurança iniciados em 13/10/2026. A etapa ainda não está implantada nem concluída.
+**Estado:** implementação concluída localmente na branch `feat/etapa-c-fundacao`; ainda depende de credenciais protegidas, merge/deploy e prova real. O relatório corrente está em [`etapa-c-progresso.md`](etapa-c-progresso.md).
 
 ## Voz e uso comercial
 
@@ -32,12 +32,12 @@ O manifesto nunca deve ir como JSON visível nos logs ou como input de workflow:
 
 ## Bloqueios para a prova ponta a ponta
 
-- O repositório está **público neste momento**. Não vou enviar roteiro, capturas ou vídeo para uma execução real enquanto essa visibilidade não for deliberadamente alterada para privada pelo dono. Releases em rascunho limitam a leitura a quem tem escrita, mas manter o projeto privado é a escolha mais segura para produção.
-- Ao tornar o repositório privado, forks públicos existentes continuam públicos e são destacados; o GitHub também apaga estrelas e watchers. Por isso, a mudança de visibilidade fica a cargo do dono, após revisar esses efeitos. [11]
-- O GitHub CLI não tem permissão para ler Actions Secrets neste repositório (retorno 403); não tentei contornar isso nem revelar tokens. Ainda será necessário configurar, sem compartilhar no chat, um PAT fine-grained somente para este repositório no ambiente Production da Vercel e um mesmo segredo HMAC no Vercel e em Actions Secrets.
-- A prova deverá usar uma pauta real, com roteiro aprovado no Portão 1 e capturas/código que o dono escolha. Dados de demonstração não serão tratados como insumo real.
+- O repositório está **privado**, conforme autorização explícita do dono em 13/10/2026.
+- As cinco tabelas aditivas de render foram aplicadas e verificadas no Neon dedicado.
+- O GitHub CLI retornou HTTP 403 ao consultar Actions Secrets. Não tentei contornar a restrição nem acessar valores secretos. O dono precisa cadastrar um PAT fine-grained limitado ao repositório na Vercel e um mesmo segredo HMAC na Vercel e em Actions Secrets; instruções estão em [`etapa-c-progresso.md`](etapa-c-progresso.md).
+- A prova precisa de deploy do branch, uma pauta real, roteiro aprovado no Portão 1 e revisão de amostra TTS pelo dono. Dados de seed/fixture não contam como prova de produção.
 
-**Não alterei visibilidade, permissões, segredos nem tabelas Neon nesta primeira fundação.** A próxima rodada pode implementar o contrato de jobs, callbacks e worker depois de concluirmos o teste do adaptador TTS e o fluxo de entrada de assets.
+**A fundação e o pipeline foram implementados e testados localmente; nenhum vídeo real foi gerado nem publicado em produção nesta etapa.** Para resultados, testes e configuração restante, consulte [`etapa-c-progresso.md`](etapa-c-progresso.md).
 
 ## Referências
 

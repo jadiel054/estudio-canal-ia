@@ -4,6 +4,7 @@ export const RENDER_CALLBACK_MAX_AGE_SECONDS = 5 * 60;
 export const RENDER_PATHS = {
   manifest: "/api/render?op=manifest",
   voice: "/api/render?op=voice",
+  input: "/api/render?op=input",
   callback: "/api/render?op=callback",
 } as const;
 const SIGNATURE_PATTERN = /^t=(\d{10}),v1=([a-f0-9]{64})$/;

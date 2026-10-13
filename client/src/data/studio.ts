@@ -77,6 +77,14 @@ export type Asset = ExampleFlag & {
   label: string;
   license: string;
   status: "Pronto" | "Pendente" | "Verificar";
+  fileName?: string;
+  contentType?: string;
+  sizeBytes?: number;
+  sha256?: string;
+  githubReleaseId?: number;
+  githubAssetId?: number;
+  inputAssetId?: string;
+  scriptVersion?: number;
 };
 
 /** `verified: false` significa que a verificação não foi executada (render simulado). */
@@ -94,6 +102,13 @@ export type Video = ExampleFlag & {
   synthetic: boolean;
   /** Render simulado: não existe arquivo de vídeo real. */
   simulated?: boolean;
+  renderJobId?: string;
+  releaseId?: number;
+  assetId?: number;
+  fileName?: string;
+  fileSizeBytes?: number;
+  finalAssetExpiresAt?: string;
+  cleanupRequestedAt?: string;
   scheduledFor?: string;
 };
 
@@ -102,10 +117,19 @@ export type RenderJob = ExampleFlag & {
   videoId: string;
   status: "queued" | "rendering" | "qa" | "succeeded" | "failed" | "simulado";
   attempts: number;
+  progress?: number;
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  errorCode?: string;
   simulated?: boolean;
+  workflowRunId?: number;
+  releaseId?: number;
+  assetId?: number;
+  fileName?: string;
+  fileSizeBytes?: number;
+  durationSeconds?: number;
+  expiresAt?: string;
 };
 
 export type Adapter = ExampleFlag & {
