@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { canStartRender } from "@shared/workflowPolicy";
 import { RENDER_PATHS, signRenderRequest } from "./renderSecurity";
-import { extractScriptVisuals } from "./renderManifest";
-import { getStudioPool, stateVersion } from "./studioRepository";
-import { generateSpeech, getTtsSettings } from "./ttsProvider";
+import { buildNarrationChunks, extractScriptVisuals } from "./renderManifest";
+import { getStudioPool, getStudioState, stateVersion } from "./studioRepository";
+import { generateSpeechCached, getTtsSettings, MAX_TTS_ATTEMPTS_PER_MODEL, TTS_NARRATION_STYLE } from "./ttsProvider";
+import { getCachedTtsKeys, ttsAudioCacheKey } from "./ttsCache";
 import { isRenderErrorCode, isRenderOperation, renderFailureSummary, type RenderErrorCode, type RenderOperation } from "./renderObservability";
 
 const OWNER = "jadiel054";
@@ -108,6 +109,7 @@ async function markRenderDispatchFailure(jobId: string, message: string) {
 export type RenderManifest = {
   jobId: string; videoId: string; scriptId: string; scriptVersion: number; title: string;
   format: "Longo" | "Short" | "Live"; cues: ReturnType<typeof extractScriptVisuals>["cues"];
+  ttsChunks: ReturnType<typeof buildNarrationChunks>;
   codeBlocks: string[]; sections: string[]; references: string[]; voiceMode: "TTS" | "Música + texto";
   inputs: Array<{ id: string; fileName: string; contentType: string; sizeBytes: number; sha256: string; label: string }>;
   tts: { primaryModel: string; fallbackModel: string; voice: string };
@@ -124,11 +126,13 @@ export async function getSignedRenderManifest(jobId: string) {
   if (!script || !idea || script.status !== "Aprovado" || script.version !== job.script_version || !script.qa) throw new Error("A aprovação do Portão 1 ou a versão do roteiro mudou; o manifesto foi bloqueado.");
   const visuals = extractScriptVisuals(script.content); const tts = await getTtsSettings();
   const inputResult = await pool.query<{ id: string; file_name: string; content_type: string; file_size_bytes: number; sha256: string }>("SELECT id::text, file_name, content_type, file_size_bytes, sha256 FROM studio_render_inputs WHERE script_id = $1 AND script_version = $2 ORDER BY created_at ASC LIMIT 5", [script.id, script.version]);
+  const voiceMode = state.settings?.voiceMode === "Música + texto" ? "Música + texto" : "TTS";
+  const ttsChunks = voiceMode === "TTS" ? buildNarrationChunks(visuals.cues) : [];
   const manifest: RenderManifest = {
     jobId: job.id, videoId: job.video_id, scriptId: job.script_id, scriptVersion: job.script_version,
-    title: idea.title, format: idea.format, cues: visuals.cues, codeBlocks: visuals.codeBlocks, sections: visuals.sections,
+    title: idea.title, format: idea.format, cues: visuals.cues, ttsChunks, codeBlocks: visuals.codeBlocks, sections: visuals.sections,
     references: (idea.captureUrls ?? []).filter((url: unknown): url is string => typeof url === "string" && /^https:\/\//i.test(url)).slice(0, 10),
-    voiceMode: state.settings?.voiceMode === "Música + texto" ? "Música + texto" : "TTS",
+    voiceMode,
     inputs: inputResult.rows.map(input => ({ id: input.id, fileName: input.file_name, contentType: input.content_type, sizeBytes: Number(input.file_size_bytes), sha256: input.sha256, label: input.file_name })),
     tts: { primaryModel: tts.primaryModel, fallbackModel: tts.fallbackModel, voice: tts.voice },
   };
@@ -149,12 +153,40 @@ export async function getSignedRenderInput(jobId: string, inputAssetId: string) 
   return { data: input.data, fileName: input.file_name, contentType: input.content_type, sha256: input.sha256, signature: signRenderRequest(input.data, requiredRenderSecret(), { method: "POST", path: RENDER_PATHS.input }) };
 }
 
-export async function synthesizeRenderCue(jobId: string, cueIndex: number) {
-  if (!Number.isInteger(cueIndex) || cueIndex < 0 || cueIndex >= 80) throw new Error("Índice de legenda fora dos limites.");
+export async function synthesizeRenderChunk(jobId: string, chunkIndex: number) {
+  if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= 80) throw new Error("Índice de bloco TTS fora dos limites.");
   const { manifest } = await getSignedRenderManifest(jobId); if (manifest.voiceMode !== "TTS") throw new Error("Este job usa música e texto; não há cue TTS.");
-  const cue = manifest.cues[cueIndex]; if (!cue || cue.index !== cueIndex) throw new Error("Trecho de narração inexistente no manifesto aprovado.");
-  const speech = await generateSpeech(cue.text, await getTtsSettings());
-  return { audio: speech.audio, signature: signRenderRequest(speech.audio, requiredRenderSecret(), { method: "POST", path: RENDER_PATHS.voice }), model: speech.model, voice: speech.voice, fallback: speech.fallback };
+  const chunk = manifest.ttsChunks[chunkIndex]; if (!chunk || chunk.index !== chunkIndex) throw new Error("Bloco de narração inexistente no manifesto aprovado.");
+  const speech = await generateSpeechCached(chunk.text, await getTtsSettings());
+  return { audio: speech.audio, signature: signRenderRequest(speech.audio, requiredRenderSecret(), { method: "POST", path: RENDER_PATHS.voice }), model: speech.model, voice: speech.voice, fallback: speech.fallback, cached: speech.cached === true };
+}
+
+export async function estimateRenderTtsCalls(ideaId: string) {
+  const state = await getStudioState() as any;
+  const idea = state?.ideas?.find((item: any) => item.id === ideaId && !item.example);
+  const script = state?.scripts?.find((item: any) => item.ideaId === ideaId && !item.example && item.status === "Aprovado" && item.qa);
+  if (!idea || !script) throw new Error("Pauta real com roteiro aprovado e QA persistido não encontrada para estimar TTS.");
+  if (state.settings?.voiceMode === "Música + texto") return { voiceMode: "Música + texto" as const, captionCount: 0, chunkCount: 0, cacheHits: 0, estimatedCalls: 0, maxPossibleCalls: 0, primaryModel: null, fallbackModel: null };
+  const cues = extractScriptVisuals(script.content).cues;
+  const chunks = buildNarrationChunks(cues);
+  const settings = await getTtsSettings();
+  const keys = chunks.flatMap(chunk => [settings.primaryModel, settings.fallbackModel].map(model => ({
+    model,
+    cacheKey: ttsAudioCacheKey({ text: chunk.text, model, voice: settings.voice, style: TTS_NARRATION_STYLE }),
+  })));
+  const cached = await getCachedTtsKeys(keys);
+  const cacheHits = chunks.filter(chunk => keys.some(item => item.cacheKey === ttsAudioCacheKey({ text: chunk.text, model: item.model, voice: settings.voice, style: TTS_NARRATION_STYLE }) && cached.has(item.cacheKey))).length;
+  const estimatedCalls = Math.max(0, chunks.length - cacheHits);
+  return {
+    voiceMode: "TTS" as const,
+    captionCount: cues.length,
+    chunkCount: chunks.length,
+    cacheHits,
+    estimatedCalls,
+    maxPossibleCalls: estimatedCalls * 2 * MAX_TTS_ATTEMPTS_PER_MODEL,
+    primaryModel: settings.primaryModel,
+    fallbackModel: settings.fallbackModel,
+  };
 }
 
 export type RenderQaCheck = { label: string; passed: boolean; verified: true; note: string };
@@ -162,6 +194,8 @@ export type RenderCallback = {
   eventId: string; jobId: string; workflowRunId: number; status: "rendering" | "qa" | "failed"; progress: number;
   message?: string; releaseId?: number; assetId?: number; fileName?: string; fileSizeBytes?: number; durationSeconds?: number; qa?: RenderQaCheck[];
   errorOperation?: RenderOperation; errorCode?: RenderErrorCode; httpStatus?: number; upstreamStatus?: number;
+  quotaScope?: "rpm" | "tpm" | "rpd" | "tpd" | "unknown"; quotaValue?: number; quotaMetric?: string; quotaId?: string; retryAfterMs?: number;
+  providerModel?: "gemini-3.8-flash-tts" | "gemini-3.8-flash-lite-tts";
 };
 
 export function validateRenderCallback(input: unknown): RenderCallback {
@@ -172,17 +206,29 @@ export function validateRenderCallback(input: unknown): RenderCallback {
   if (!(value.status === "rendering" || value.status === "qa" || value.status === "failed")) throw new Error("Status de callback não permitido.");
   if (!Number.isInteger(value.progress) || Number(value.progress) < 0 || Number(value.progress) > 100) throw new Error("Progresso fora do intervalo aceito.");
   const callback: RenderCallback = { eventId: value.eventId, jobId: value.jobId, workflowRunId: Number(value.workflowRunId), status: value.status, progress: Number(value.progress), ...(typeof value.message === "string" ? { message: value.message.slice(0, 400) } : {}) };
-  const hasDiagnostics = value.errorOperation !== undefined || value.errorCode !== undefined || value.httpStatus !== undefined || value.upstreamStatus !== undefined;
+  const diagnosticKeys = ["errorOperation", "errorCode", "httpStatus", "upstreamStatus", "quotaScope", "quotaValue", "quotaMetric", "quotaId", "retryAfterMs", "providerModel"] as const;
+  const hasDiagnostics = diagnosticKeys.some(key => value[key] !== undefined);
   if (value.status === "failed") {
     if (value.errorOperation !== undefined && !isRenderOperation(value.errorOperation)) throw new Error("Operação de diagnóstico inválida.");
     if (value.errorCode !== undefined && !isRenderErrorCode(value.errorCode)) throw new Error("Código de diagnóstico inválido.");
     for (const key of ["httpStatus", "upstreamStatus"] as const) {
       if (value[key] !== undefined && (!Number.isInteger(value[key]) || Number(value[key]) < 100 || Number(value[key]) > 599)) throw new Error("Status HTTP de diagnóstico inválido.");
     }
+    if (value.quotaScope !== undefined && !["rpm", "tpm", "rpd", "tpd", "unknown"].includes(String(value.quotaScope))) throw new Error("Escopo de quota inválido.");
+    if (value.quotaValue !== undefined && (typeof value.quotaValue !== "number" || !Number.isFinite(value.quotaValue) || value.quotaValue < 0 || value.quotaValue > 1_000_000_000_000)) throw new Error("Valor de quota inválido.");
+    for (const key of ["quotaMetric", "quotaId"] as const) if (value[key] !== undefined && (typeof value[key] !== "string" || !/^[A-Za-z0-9_./:-]{1,120}$/.test(value[key] as string))) throw new Error("Identificador de quota inválido.");
+    if (value.retryAfterMs !== undefined && (!Number.isInteger(value.retryAfterMs) || Number(value.retryAfterMs) < 0 || Number(value.retryAfterMs) > 604_800_000)) throw new Error("Retry-After inválido.");
+    if (value.providerModel !== undefined && !["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"].includes(String(value.providerModel))) throw new Error("Modelo TTS inválido.");
     callback.errorOperation = isRenderOperation(value.errorOperation) ? value.errorOperation : "worker";
     callback.errorCode = isRenderErrorCode(value.errorCode) ? value.errorCode : "render_failed";
     if (value.httpStatus !== undefined) callback.httpStatus = Number(value.httpStatus);
     if (value.upstreamStatus !== undefined) callback.upstreamStatus = Number(value.upstreamStatus);
+    if (value.quotaScope !== undefined) callback.quotaScope = value.quotaScope as RenderCallback["quotaScope"];
+    if (value.quotaValue !== undefined) callback.quotaValue = Number(value.quotaValue);
+    if (value.quotaMetric !== undefined) callback.quotaMetric = String(value.quotaMetric);
+    if (value.quotaId !== undefined) callback.quotaId = String(value.quotaId);
+    if (value.retryAfterMs !== undefined) callback.retryAfterMs = Number(value.retryAfterMs);
+    if (value.providerModel !== undefined) callback.providerModel = value.providerModel as RenderCallback["providerModel"];
   } else if (hasDiagnostics) {
     throw new Error("Diagnóstico só é permitido em callbacks de falha.");
   }
@@ -250,8 +296,8 @@ export async function processRenderCallback(rawInput: unknown) {
         await connection.query("UPDATE studio_render_jobs SET status = 'failed', progress = $2, workflow_run_id = $3, release_id = $4, asset_id = $5, file_name = $6, file_size_bytes = $7, duration_seconds = $8, qa = $9::jsonb, error_code = 'qa_failed', error_message = $10, finished_at = NOW(), updated_at = NOW() WHERE id = $1::uuid", [callback.jobId, callback.progress, callback.workflowRunId, callback.releaseId, callback.assetId, callback.fileName, callback.fileSizeBytes, callback.durationSeconds, JSON.stringify(callback.qa), failedReason]);
       }
     } else if (callback.status === "failed") {
-      finalStatus = "failed"; failedReason = renderFailureSummary({ operation: callback.errorOperation, errorCode: callback.errorCode, httpStatus: callback.httpStatus, upstreamStatus: callback.upstreamStatus }); video.stage = "erro"; idea.status = "erro"; storedJob.status = "failed"; storedJob.error = failedReason; storedJob.errorCode = callback.errorCode ?? "render_failed"; storedJob.errorOperation = callback.errorOperation ?? "worker"; storedJob.httpStatus = callback.httpStatus; storedJob.upstreamStatus = callback.upstreamStatus; storedJob.finishedAt = now; storedJob.progress = callback.progress; storedJob.workflowRunId = callback.workflowRunId;
-      await connection.query("UPDATE studio_render_jobs SET status = 'failed', progress = $2, workflow_run_id = $3, error_code = $4, error_message = $5, finished_at = NOW(), updated_at = NOW() WHERE id = $1::uuid", [callback.jobId, callback.progress, callback.workflowRunId, storedJob.errorCode, failedReason]);
+      finalStatus = "failed"; failedReason = renderFailureSummary({ operation: callback.errorOperation, errorCode: callback.errorCode, httpStatus: callback.httpStatus, upstreamStatus: callback.upstreamStatus, quotaScope: callback.quotaScope, quotaValue: callback.quotaValue, quotaMetric: callback.quotaMetric, quotaId: callback.quotaId, retryAfterMs: callback.retryAfterMs, providerModel: callback.providerModel }); video.stage = "erro"; idea.status = "erro"; storedJob.status = "failed"; storedJob.error = failedReason; storedJob.errorCode = callback.errorCode ?? "render_failed"; storedJob.errorOperation = callback.errorOperation ?? "worker"; storedJob.httpStatus = callback.httpStatus; storedJob.upstreamStatus = callback.upstreamStatus; storedJob.quotaScope = callback.quotaScope; storedJob.quotaValue = callback.quotaValue; storedJob.quotaMetric = callback.quotaMetric; storedJob.quotaId = callback.quotaId; storedJob.retryAfterMs = callback.retryAfterMs; storedJob.providerModel = callback.providerModel; storedJob.finishedAt = now; storedJob.progress = callback.progress; storedJob.workflowRunId = callback.workflowRunId;
+      await connection.query("UPDATE studio_render_jobs SET status = 'failed', progress = $2, workflow_run_id = $3, error_code = $4, error_message = $5, http_status = $6, upstream_status = $7, quota_scope = $8, quota_value = $9, quota_metric = $10, quota_id = $11, retry_after_ms = $12, provider_model = $13, finished_at = NOW(), updated_at = NOW() WHERE id = $1::uuid", [callback.jobId, callback.progress, callback.workflowRunId, storedJob.errorCode, failedReason, callback.httpStatus ?? null, callback.upstreamStatus ?? null, callback.quotaScope ?? null, callback.quotaValue ?? null, callback.quotaMetric ?? null, callback.quotaId ?? null, callback.retryAfterMs ?? null, callback.providerModel ?? null]);
     } else {
       if (job.status === "failed") throw new Error("Job falhado não pode voltar a executar sem uma nova tentativa aprovada.");
       finalStatus = "rendering"; video.stage = "render"; storedJob.status = "rendering"; storedJob.progress = callback.progress; storedJob.workflowRunId = callback.workflowRunId;
@@ -261,7 +307,7 @@ export async function processRenderCallback(rawInput: unknown) {
     const oldVersion = stateVersion(state); state.version = oldVersion + 1;
     const saved = await connection.query("UPDATE app_settings SET value = $1::jsonb, updated_at = NOW() WHERE key = 'studio_state' AND COALESCE((value->>'version')::int, 0) = $2", [JSON.stringify(state), oldVersion]);
     if (saved.rowCount !== 1) throw new Error("Conflito de versão ao atualizar o status do render.");
-    await connection.query("INSERT INTO audit_log (actor, action, target, details) VALUES ('Sistema', $1, $2, $3::jsonb)", [`Render ${finalStatus}`, idea.title, JSON.stringify({ jobId: callback.jobId, workflowRunId: callback.workflowRunId, progress: callback.progress, ...(finalStatus === "failed" ? { operation: storedJob.errorOperation ?? "worker", errorCode: storedJob.errorCode ?? "render_failed", httpStatus: storedJob.httpStatus, upstreamStatus: storedJob.upstreamStatus } : {}) })]);
+    await connection.query("INSERT INTO audit_log (actor, action, target, details) VALUES ('Sistema', $1, $2, $3::jsonb)", [`Render ${finalStatus}`, idea.title, JSON.stringify({ jobId: callback.jobId, workflowRunId: callback.workflowRunId, progress: callback.progress, ...(finalStatus === "failed" ? { operation: storedJob.errorOperation ?? "worker", errorCode: storedJob.errorCode ?? "render_failed", httpStatus: storedJob.httpStatus, upstreamStatus: storedJob.upstreamStatus, quotaScope: storedJob.quotaScope, quotaValue: storedJob.quotaValue, quotaMetric: storedJob.quotaMetric, quotaId: storedJob.quotaId, retryAfterMs: storedJob.retryAfterMs, providerModel: storedJob.providerModel } : {}) })]);
     await connection.query("COMMIT"); return { duplicate: false, jobId: callback.jobId, status: finalStatus, progress: callback.progress };
   } catch (error) { await connection.query("ROLLBACK"); throw error; }
   finally { connection.release(); }

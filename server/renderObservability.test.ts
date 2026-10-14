@@ -11,8 +11,18 @@ describe("observabilidade segura do render", () => {
     expect(renderFailureSummary(diagnostic)).not.toContain("roteiro privado");
   });
 
+  it("distingue quota diária sem texto livre e conserva metadados limitados", () => {
+    const error = new TtsProviderError("mensagem privada", 429, "quota_daily", "gemini-3.8-flash-tts", {
+      scope: "rpd", value: 100, metric: "generativelanguage.googleapis.com/requests_per_day", id: "tts_rpd", retryAfterMs: 86_400_000,
+    });
+    const diagnostic = classifyRenderFailure("voice", error);
+    expect(diagnostic).toMatchObject({ operation: "voice", errorCode: "tts_quota_daily", upstreamStatus: 429, quotaScope: "rpd", quotaValue: 100, quotaId: "tts_rpd", retryAfterMs: 86_400_000, providerModel: "gemini-3.8-flash-tts" });
+    expect(renderFailureSummary(diagnostic)).not.toContain("mensagem privada");
+    expect(classifyRenderFailure("voice", new TtsProviderError("", 429, "quota_minute", undefined, { scope: "rpm" })).errorCode).toBe("tts_quota_minute");
+  });
+
   it("usa código genérico fixo para falhas não classificadas", () => {
-    expect(classifyRenderFailure("manifest", new Error("segredo ou texto editorial"))).toEqual({ errorCode: "manifest_operation_failed" });
+    expect(classifyRenderFailure("manifest", new Error("segredo ou texto editorial"))).toEqual({ operation: "manifest", errorCode: "manifest_operation_failed" });
   });
 
   it("aceita apenas operações e códigos previamente definidos", () => {

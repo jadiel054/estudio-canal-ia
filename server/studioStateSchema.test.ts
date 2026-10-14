@@ -54,10 +54,12 @@ describe("validação do estado do estúdio", () => {
     state.renderJobs = [{
       id: "job-1", videoId: "video-1", status: "failed", attempts: 1,
       error: "operation=voice code=tts_timeout http=400 upstream=429",
-      errorCode: "tts_timeout", errorOperation: "voice", httpStatus: 400, upstreamStatus: 429,
+      errorCode: "tts_quota_daily", errorOperation: "voice", httpStatus: 400, upstreamStatus: 429,
+      quotaScope: "rpd", quotaValue: 25, quotaMetric: "generativelanguage.googleapis.com/requests_per_day", quotaId: "tts_requests", retryAfterMs: 86_400_000, providerModel: "gemini-3.8-flash-tts",
     }];
     expect(parseStudioState(state).renderJobs[0]).toMatchObject({
-      errorCode: "tts_timeout", errorOperation: "voice", httpStatus: 400, upstreamStatus: 429,
+      errorCode: "tts_quota_daily", errorOperation: "voice", httpStatus: 400, upstreamStatus: 429,
+      quotaScope: "rpd", quotaValue: 25, quotaMetric: "generativelanguage.googleapis.com/requests_per_day", quotaId: "tts_requests", retryAfterMs: 86_400_000, providerModel: "gemini-3.8-flash-tts",
     });
   });
 

@@ -49,4 +49,17 @@ describe("callback do render real", () => {
     expect(() => validateRenderCallback({ ...failed, httpStatus: 99 })).toThrow("Status HTTP");
     expect(() => validateRenderCallback({ ...base, errorCode: "tts_timeout" })).toThrow("só é permitido");
   });
+
+  it("aceita somente metadados estruturados e limitados de quota", () => {
+    const failed = validateRenderCallback({
+      eventId, jobId, workflowRunId: 77, status: "failed", progress: 90,
+      errorOperation: "voice", errorCode: "tts_quota_daily", httpStatus: 400, upstreamStatus: 429,
+      quotaScope: "rpd", quotaValue: 25, quotaMetric: "generativelanguage.googleapis.com/requests_per_day",
+      quotaId: "tts_requests", retryAfterMs: 86_400_000, providerModel: "gemini-3.8-flash-tts",
+    });
+    expect(failed).toMatchObject({ quotaScope: "rpd", quotaValue: 25, quotaMetric: "generativelanguage.googleapis.com/requests_per_day", retryAfterMs: 86_400_000, providerModel: "gemini-3.8-flash-tts" });
+    expect(() => validateRenderCallback({ ...failed, quotaMetric: "quota label: roteiro confidencial" })).toThrow("Identificador de quota");
+    expect(() => validateRenderCallback({ ...failed, retryAfterMs: -1 })).toThrow("Retry-After");
+    expect(() => validateRenderCallback({ ...failed, providerModel: "segredo" })).toThrow("Modelo TTS");
+  });
 });

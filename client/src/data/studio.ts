@@ -125,6 +125,12 @@ export type RenderJob = ExampleFlag & {
   errorOperation?: string;
   httpStatus?: number;
   upstreamStatus?: number;
+  quotaScope?: "rpm" | "tpm" | "rpd" | "tpd" | "unknown";
+  quotaValue?: number;
+  quotaMetric?: string;
+  quotaId?: string;
+  retryAfterMs?: number;
+  providerModel?: "gemini-3.8-flash-tts" | "gemini-3.8-flash-lite-tts";
   simulated?: boolean;
   workflowRunId?: number;
   releaseId?: number;

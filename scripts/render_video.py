@@ -27,11 +27,12 @@ GH_TOKEN = os.environ.get("GH_TOKEN", "")
 GH_API = "https://api.github.com/repos/jadiel054/estudio-canal-ia"
 WORK = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / f"studio-render-{JOB_ID}"
 MAX_OUTPUT_BYTES = 1_900_000_000
+TTS_CHUNK_PAUSE_SECONDS = 1.0
 
 RENDER_OPERATIONS = {"manifest", "voice", "input", "callback", "render", "qa", "release", "dispatch", "worker", "unknown"}
 SAFE_RENDER_ERROR_CODES = {
     "render_unauthorized", "render_operation_not_found", "invalid_json_body", "invalid_job_id",
-    "invalid_voice_request", "invalid_input_request", "tts_invalid_key", "tts_unavailable",
+    "invalid_voice_request", "invalid_input_request", "tts_invalid_key", "tts_unavailable", "tts_quota_daily", "tts_quota_minute", "tts_quota_unknown",
     "tts_invalid_audio", "tts_network", "tts_timeout", "manifest_operation_failed",
     "voice_operation_failed", "input_operation_failed", "callback_operation_failed", "render_failed",
     "qa_failed", "release_failed", "dispatch_failed", "worker_unexpected", "render_network_error",
@@ -55,13 +56,38 @@ def safe_http_status(value) -> int | None:
         return None
     return status if 100 <= status <= 599 else None
 
+SAFE_QUOTA_SCOPES = {"rpm", "tpm", "rpd", "tpd", "unknown"}
+SAFE_TTS_MODELS = {"gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"}
+def safe_quota_scope(value) -> str | None:
+    return value if value in SAFE_QUOTA_SCOPES else None
+def safe_quota_value(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if 0 <= number <= 1_000_000_000_000 else None
+def safe_quota_identifier(value) -> str | None:
+    return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_./:-]{1,120}", value) else None
+def safe_retry_after(value) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if 0 <= number <= 604_800_000 else None
+
 class RenderError(RuntimeError):
-    def __init__(self, message: str, *, operation: str = "worker", error_code: str = "render_failed", http_status: int | None = None, upstream_status: int | None = None):
+    def __init__(self, message: str, *, operation: str = "worker", error_code: str = "render_failed", http_status: int | None = None, upstream_status: int | None = None, quota_scope: str | None = None, quota_value: float | None = None, quota_metric: str | None = None, quota_id: str | None = None, retry_after_ms: int | None = None, provider_model: str | None = None):
         super().__init__(message)
         self.operation = operation if operation in RENDER_OPERATIONS else "worker"
         self.error_code = error_code if error_code in SAFE_RENDER_ERROR_CODES else "render_failed"
         self.http_status = safe_http_status(http_status)
         self.upstream_status = safe_http_status(upstream_status)
+        self.quota_scope = safe_quota_scope(quota_scope)
+        self.quota_value = safe_quota_value(quota_value)
+        self.quota_metric = safe_quota_identifier(quota_metric)
+        self.quota_id = safe_quota_identifier(quota_id)
+        self.retry_after_ms = safe_retry_after(retry_after_ms)
+        self.provider_model = provider_model if provider_model in SAFE_TTS_MODELS else None
 
 def compact_json(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -107,7 +133,15 @@ def post_studio(path: str, body: bytes, *, response_type: str = "json", verify_s
             return data, response.headers
     except urllib.error.HTTPError as exc:
         # Não ler/imprimir o body: a resposta pode conter texto editorial ou dados sensíveis.
-        raise RenderError("Endpoint interno do Estúdio recusou a operação.", operation=operation, error_code=safe_error_code(exc.headers), http_status=exc.code, upstream_status=safe_http_status(exc.headers.get("X-Render-Upstream-Status") if exc.headers else None)) from None
+        headers = exc.headers
+        raise RenderError("Endpoint interno do Estúdio recusou a operação.", operation=operation, error_code=safe_error_code(headers), http_status=exc.code,
+            upstream_status=safe_http_status(headers.get("X-Render-Upstream-Status") if headers else None),
+            quota_scope=safe_quota_scope(headers.get("X-Render-Quota-Scope") if headers else None),
+            quota_value=safe_quota_value(headers.get("X-Render-Quota-Value") if headers else None),
+            quota_metric=safe_quota_identifier(headers.get("X-Render-Quota-Metric") if headers else None),
+            quota_id=safe_quota_identifier(headers.get("X-Render-Quota-Id") if headers else None),
+            retry_after_ms=safe_retry_after(headers.get("X-Render-Retry-After-Ms") if headers else None),
+            provider_model=headers.get("X-Render-TTS-Model") if headers else None) from None
     except (urllib.error.URLError, TimeoutError):
         raise RenderError("Falha de rede ao conectar ao endpoint interno do Estúdio.", operation=operation, error_code="render_network_error") from None
 
@@ -257,6 +291,18 @@ def callback(manifest: dict, status: str, progress: int, *, message: str | None 
             payload["httpStatus"] = diagnostic.http_status
         if diagnostic.upstream_status is not None:
             payload["upstreamStatus"] = diagnostic.upstream_status
+        if diagnostic.quota_scope is not None:
+            payload["quotaScope"] = diagnostic.quota_scope
+        if diagnostic.quota_value is not None:
+            payload["quotaValue"] = diagnostic.quota_value
+        if diagnostic.quota_metric is not None:
+            payload["quotaMetric"] = diagnostic.quota_metric
+        if diagnostic.quota_id is not None:
+            payload["quotaId"] = diagnostic.quota_id
+        if diagnostic.retry_after_ms is not None:
+            payload["retryAfterMs"] = diagnostic.retry_after_ms
+        if diagnostic.provider_model is not None:
+            payload["providerModel"] = diagnostic.provider_model
     if result:
         payload.update(result)
     body = compact_json(payload)
@@ -271,10 +317,36 @@ def fetch_manifest() -> dict:
     manifest = response
     if manifest.get("jobId") != JOB_ID or not manifest.get("cues") or len(manifest["cues"]) > 80:
         raise RenderError("O manifesto não corresponde ao job ou não contém cues válidos.", operation="manifest", error_code="manifest_invalid")
+    if manifest.get("voiceMode") == "TTS":
+        validate_tts_chunks(manifest)
     return manifest
 
-def fetch_voice(job_id: str, cue_index: int, output: Path) -> float:
-    body = compact_json({"jobId": job_id, "cueIndex": cue_index})
+def validate_tts_chunks(manifest: dict) -> dict[int, dict]:
+    chunks = manifest.get("ttsChunks")
+    cues = manifest.get("cues")
+    if not isinstance(chunks, list) or not chunks or len(chunks) > 80 or not isinstance(cues, list):
+        raise RenderError("Manifesto TTS não contém blocos válidos.", operation="manifest", error_code="manifest_invalid")
+    mapping: dict[int, dict] = {}
+    seen: set[int] = set()
+    expected_cue_index = 0
+    for expected_index, chunk in enumerate(chunks):
+        if not isinstance(chunk, dict) or chunk.get("index") != expected_index or not isinstance(chunk.get("text"), str) or not 1 <= len(chunk["text"]) <= 2_000:
+            raise RenderError("Bloco TTS inválido no manifesto.", operation="manifest", error_code="manifest_invalid")
+        indices = chunk.get("cueIndices")
+        if not isinstance(indices, list) or not indices:
+            raise RenderError("Mapeamento de legendas TTS inválido.", operation="manifest", error_code="manifest_invalid")
+        for cue_index in indices:
+            if not isinstance(cue_index, int) or cue_index != expected_cue_index or cue_index < 0 or cue_index >= len(cues) or cue_index in seen:
+                raise RenderError("Mapeamento de legendas TTS inválido.", operation="manifest", error_code="manifest_invalid")
+            seen.add(cue_index)
+            mapping[cue_index] = chunk
+            expected_cue_index += 1
+    if seen != set(range(len(cues))):
+        raise RenderError("Blocos TTS não cobrem todas as legendas.", operation="manifest", error_code="manifest_invalid")
+    return mapping
+
+def fetch_voice(job_id: str, chunk_index: int, output: Path) -> float:
+    body = compact_json({"jobId": job_id, "chunkIndex": chunk_index})
     audio, headers = post_studio("/api/render?op=voice", body, response_type="binary")
     if len(audio) < 64 or audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
         raise RenderError("O adaptador TTS não retornou WAV válido.", operation="voice", error_code="invalid_tts_wav")
@@ -311,6 +383,64 @@ def make_music_track(duration: float, output: Path):
     fade_out = max(0.0, duration-2.0)
     run(["ffmpeg", "-y", "-f", "lavfi", "-i", audio_src, "-af", f"afade=t=in:st=0:d=1.5,afade=t=out:st={fade_out:.3f}:d=2,volume=0.7", "-c:a", "pcm_s16le", str(output)], "gerar trilha instrumental sintética")
 
+def detect_silence_intervals(audio_path: Path) -> list[tuple[float, float]]:
+    """Detecta pausas sem guardar áudio nem imprimir saída; retorna lista vazia se indisponível."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostats", "-i", str(audio_path), "-af", "silencedetect=noise=-35dB:d=0.12", "-f", "null", "-"],
+            check=False, capture_output=True, text=True, timeout=25,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    starts: list[float] = []
+    intervals: list[tuple[float, float]] = []
+    for line in result.stderr.splitlines():
+        start_match = re.search(r"silence_start:\s*([0-9]+(?:\.[0-9]+)?)", line)
+        end_match = re.search(r"silence_end:\s*([0-9]+(?:\.[0-9]+)?)", line)
+        if start_match:
+            starts.append(float(start_match.group(1)))
+        if end_match and starts:
+            intervals.append((starts.pop(0), float(end_match.group(1))))
+    return [(start, end) for start, end in intervals if 0 <= start < end]
+
+def allocate_cue_timings(cue_texts: list[str], duration: float, silences: list[tuple[float, float]] | None = None) -> list[tuple[float, float]]:
+    """Aloca tempos proporcionalmente ao texto e ajusta a fronteira a pausas próximas quando existem."""
+    if not cue_texts or duration <= 0:
+        return []
+    weights = [max(1, len(text.strip())) for text in cue_texts]
+    total_weight = sum(weights)
+    timings: list[tuple[float, float]] = []
+    previous_end = 0.0
+    elapsed_weight = 0
+    for index, weight in enumerate(weights):
+        start = previous_end
+        elapsed_weight += weight
+        if index == len(weights) - 1:
+            end = duration
+            next_start = end
+        else:
+            target = duration * elapsed_weight / total_weight
+            candidates = [
+                (silence_start, silence_end) for silence_start, silence_end in (silences or [])
+                if previous_end + 0.05 < silence_start < silence_end < duration - 0.05
+                and abs((silence_start + silence_end) / 2 - target) <= min(0.75, duration * 0.12)
+            ]
+            if candidates:
+                silence_start, silence_end = min(candidates, key=lambda pair: abs((pair[0] + pair[1]) / 2 - target))
+                end, next_start = silence_start, silence_end
+            else:
+                end = max(previous_end, target)
+                next_start = end
+        timings.append((start, max(start, end)))
+        previous_end = next_start
+    return timings
+
+def pause_before_tts_chunk(chunk_index: int):
+    if chunk_index > 0:
+        time.sleep(TTS_CHUNK_PAUSE_SECONDS)
+
 def create_video(manifest: dict, directory: Path) -> tuple[Path, Path, float]:
     cues = manifest["cues"]
     if manifest.get("format") == "Short":
@@ -324,13 +454,34 @@ def create_video(manifest: dict, directory: Path) -> tuple[Path, Path, float]:
     durations: list[float] = []
     time_cursor = 0.0
     is_tts = manifest.get("voiceMode") == "TTS"
+    cue_to_chunk = validate_tts_chunks(manifest) if is_tts else {}
+    chunk_audio: dict[int, tuple[Path, float, list[tuple[float, float]]]] = {}
+    chunks = manifest.get("ttsChunks", []) if is_tts else []
+    if is_tts:
+        for chunk in chunks:
+            pause_before_tts_chunk(int(chunk["index"]))
+            audio_path = directory / f"voice-chunk-{int(chunk['index']):03d}.wav"
+            speech_duration = fetch_voice(manifest["jobId"], int(chunk["index"]), audio_path)
+            cue_texts = [str(cues[item].get("text", "")) for item in chunk["cueIndices"]]
+            timings = allocate_cue_timings(cue_texts, speech_duration, detect_silence_intervals(audio_path))
+            chunk_audio[int(chunk["index"])] = (audio_path, speech_duration, timings)
+            audio_files.append(audio_path)
+    completed_chunks: set[int] = set()
     for index, cue in enumerate(cues):
         if is_tts:
-            audio_path = directory / f"voice-{index:03d}.wav"
-            speech_duration = fetch_voice(manifest["jobId"], int(cue["index"]), audio_path)
-            audio_files.append(audio_path)
-            segment_duration = speech_duration + 0.25
-            subtitles.append((time_cursor, time_cursor + speech_duration, str(cue["text"])))
+            cue_index = int(cue["index"])
+            chunk = cue_to_chunk[cue_index]
+            chunk_index = int(chunk["index"])
+            local_index = chunk["cueIndices"].index(cue_index)
+            cue_start, cue_end = chunk_audio[chunk_index][2][local_index]
+            is_last_cue = chunk["cueIndices"][-1] == cue_index
+            chunk_start = time_cursor - cue_start
+            subtitles.append((chunk_start + cue_start, chunk_start + cue_end, str(cue["text"])))
+            if is_last_cue:
+                segment_duration = chunk_audio[chunk_index][1] - cue_start + 0.25
+            else:
+                next_cue_start = chunk_audio[chunk_index][2][local_index + 1][0]
+                segment_duration = next_cue_start - cue_start
         else:
             segment_duration = min(14.0, max(3.5, len(str(cue["text"])) / 14.0 + 1.5))
             subtitles.append((time_cursor, time_cursor + segment_duration, str(cue["text"])))
@@ -340,8 +491,9 @@ def create_video(manifest: dict, directory: Path) -> tuple[Path, Path, float]:
         make_slide(slide, manifest, cue, index, dimensions, capture)
         slides.append(slide)
         time_cursor += segment_duration
-        if is_tts and ((index + 1) % 5 == 0 or index == len(cues)-1):
-            callback(manifest, "rendering", min(55, 8 + int(45 * (index+1) / len(cues))))
+        if is_tts and is_last_cue and chunk_index not in completed_chunks:
+            completed_chunks.add(chunk_index)
+            callback(manifest, "rendering", min(55, 8 + int(45 * len(completed_chunks) / max(1, len(chunks)))))
     if not is_tts:
         callback(manifest, "rendering", 50)
 
@@ -388,7 +540,7 @@ def qa_result(path: Path, srt_path: Path, probed: dict, manifest: dict) -> tuple
     checks = [
         {"label": "video_stream", "passed": bool(video and video.get("codec_name") == "h264" and (video.get("width"), video.get("height")) == expected_dims), "verified": True, "note": f"H.264 {video.get('width')}x{video.get('height')}" if video else "Stream de vídeo ausente"},
         {"label": "audio_stream", "passed": bool(audio and audio.get("codec_name") == "aac"), "verified": True, "note": f"Áudio {audio.get('codec_name')}" if audio else "Stream de áudio ausente"},
-        {"label": "captions", "passed": bool(captions and "-->" in captions and len(captions.split("-->")) >= 2), "verified": True, "note": f"SRT com {len(manifest['cues'])} cues; legendas queimadas no MP4"},
+        {"label": "captions", "passed": bool(captions and "-->" in captions and len(captions.split("-->")) >= 2), "verified": True, "note": f"SRT com {len(manifest['cues'])} cues; sincronismo aproximado por texto/silêncio; legendas queimadas no MP4" if manifest.get("voiceMode") == "TTS" else f"SRT com {len(manifest['cues'])} cues; legendas queimadas no MP4"},
         {"label": "duration", "passed": 0 < duration <= 7200 and short_limit, "verified": True, "note": f"Duração medida por ffprobe: {duration:.2f}s"},
         {"label": "file_size", "passed": 10_000 < size <= MAX_OUTPUT_BYTES, "verified": True, "note": f"Arquivo verificado: {size} bytes"},
     ]

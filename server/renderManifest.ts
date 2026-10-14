@@ -1,5 +1,7 @@
 export type NarrationCue = { index: number; section: string; text: string };
+export type NarrationChunk = { index: number; cueIndices: number[]; text: string };
 export type ScriptVisuals = { cues: NarrationCue[]; codeBlocks: string[]; sections: string[] };
+export const MAX_TTS_CHUNK_CHARS = 1_100;
 const MAX_CUE_CHARS = 180;
 const MAX_CUES = 80;
 
@@ -77,6 +79,33 @@ export function extractScriptVisuals(content: string): ScriptVisuals {
   if (!cues.length) throw new Error("O roteiro aprovado não contém texto de narração fora dos blocos de código.");
   if (cues.length > MAX_CUES) throw new Error(`O roteiro excede o limite seguro de ${MAX_CUES} trechos de narração; divida-o em partes antes do render.`);
   return { cues, codeBlocks: codeBlocks.slice(0, 12), sections: sections.map(section => section.title).slice(0, 30) };
+}
+
+/** Agrupa cues inteiros em blocos de fala para reduzir chamadas mantendo a legenda por frase. */
+export function buildNarrationChunks(cues: NarrationCue[], maxChars = MAX_TTS_CHUNK_CHARS): NarrationChunk[] {
+  if (!Number.isInteger(maxChars) || maxChars < MAX_CUE_CHARS || maxChars > 2_000) throw new Error("Limite de bloco TTS inválido.");
+  if (!Array.isArray(cues) || cues.length < 1 || cues.length > MAX_CUES) throw new Error("Quantidade de cues fora dos limites para agrupamento TTS.");
+  const chunks: NarrationChunk[] = [];
+  let textParts: string[] = [];
+  let cueIndices: number[] = [];
+  let chars = 0;
+  const flush = () => {
+    if (!cueIndices.length) return;
+    chunks.push({ index: chunks.length, cueIndices, text: textParts.join(" ") });
+    textParts = [];
+    cueIndices = [];
+    chars = 0;
+  };
+  for (const cue of cues) {
+    if (!Number.isInteger(cue.index) || cue.index < 0 || typeof cue.text !== "string" || !cue.text.trim() || cue.text.length > maxChars) throw new Error("Cue TTS inválido para agrupamento.");
+    const nextChars = chars + (chars ? 1 : 0) + cue.text.length;
+    if (cueIndices.length && nextChars > maxChars) flush();
+    textParts.push(cue.text.trim());
+    cueIndices.push(cue.index);
+    chars += (chars ? 1 : 0) + cue.text.trim().length;
+  }
+  flush();
+  return chunks;
 }
 
 export function formatSrtTimestamp(seconds: number): string {

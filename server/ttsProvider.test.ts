@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_TTS_SETTINGS, generateSpeech, testTtsConnection, TTS_MODELS } from "./ttsProvider";
+import { DEFAULT_TTS_SETTINGS, generateSpeech, generateSpeechCached, testTtsConnection, TTS_MODELS, TtsProviderError } from "./ttsProvider";
+
+const cacheEntries = vi.hoisted(() => new Map<string, Uint8Array>());
+vi.mock("./ttsCache", () => ({
+  getCachedTtsAudio: async (key: string) => { const audio = cacheEntries.get(key); return audio ? Buffer.from(audio) : undefined; },
+  saveCachedTtsAudio: async (entry: { cacheKey: string; audio: Buffer }) => { cacheEntries.set(entry.cacheKey, new Uint8Array(entry.audio)); return true; },
+  ttsAudioCacheKey: (value: { text: string; model: string; voice: string; style: string }) => JSON.stringify([value.model, value.voice, value.style, value.text.trim()]),
+}));
 
 function sampleWav(sampleRate = 24_000) {
   const wav = Buffer.alloc(256);
@@ -19,10 +26,11 @@ function sampleWav(sampleRate = 24_000) {
   return wav;
 }
 
-function responseFromBody(body: unknown, status = 200) {
+function responseFromBody(body: unknown, status = 200, headers?: HeadersInit) {
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: new Headers(headers),
     text: async () => JSON.stringify(body),
   } as Response;
 }
@@ -38,6 +46,8 @@ function okResponse(audio = sampleWav()) {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
+  cacheEntries.clear();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
@@ -69,16 +79,72 @@ describe("Gemini TTS adapter", () => {
 
   it("uses the configured fallback after primary failure", async () => {
     vi.stubEnv("STUDIO_LLM_GEMINI_KEY", "unit-test-key");
+    vi.useFakeTimers();
     const fetchMock = vi.fn()
+      .mockResolvedValueOnce(responseFromBody({ error: { status: "UNAVAILABLE" } }, 503))
+      .mockResolvedValueOnce(responseFromBody({ error: { status: "UNAVAILABLE" } }, 503))
       .mockResolvedValueOnce(responseFromBody({ error: { status: "UNAVAILABLE" } }, 503))
       .mockResolvedValueOnce(okResponse());
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await generateSpeech("Esta é uma frase curta.");
+    const resultPromise = generateSpeech("Esta é uma frase curta.");
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
 
     expect(result.fallback).toBe(true);
     expect(result.model).toBe(DEFAULT_TTS_SETTINGS.fallbackModel);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("respects structured Retry-After/retryDelay for per-minute quota with bounded backoff", async () => {
+    vi.stubEnv("STUDIO_LLM_GEMINI_KEY", "unit-test-key");
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const minuteLimit = responseFromBody({ error: { status: "RESOURCE_EXHAUSTED", details: [
+      { "@type": "type.googleapis.com/google.rpc.QuotaFailure", violations: [{ quotaMetric: "generativelanguage.googleapis.com/requests_per_minute", quotaId: "tts_rpm", quotaValue: 5 }] },
+      { "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "2s" },
+    ] } }, 429, { "Retry-After": "1" });
+    const fetchMock = vi.fn().mockResolvedValueOnce(minuteLimit).mockResolvedValueOnce(okResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const resultPromise = generateSpeech("Uma fala de teste.");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(resultPromise).resolves.toMatchObject({ fallback: false, model: DEFAULT_TTS_SETTINGS.primaryModel });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops retries on daily quota and surfaces only structured quota metadata", async () => {
+    vi.stubEnv("STUDIO_LLM_GEMINI_KEY", "unit-test-key");
+    const dailyLimit = responseFromBody({ error: { status: "RESOURCE_EXHAUSTED", message: "texto privado não persistir", details: [
+      { "@type": "type.googleapis.com/google.rpc.QuotaFailure", violations: [{ quotaMetric: "generativelanguage.googleapis.com/requests_per_day", quotaId: "tts_rpd", quotaValue: 100, description: "daily limit" }] },
+      { "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "86400s" },
+    ] } }, 429);
+    const fetchMock = vi.fn(async () => dailyLimit);
+    vi.stubGlobal("fetch", fetchMock);
+
+    let caught: unknown;
+    try { await generateSpeech("Uma fala de teste."); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(TtsProviderError);
+    expect(caught).toMatchObject({ kind: "quota_daily", quota: { scope: "rpd", value: 100, id: "tts_rpd", retryAfterMs: 86_400_000 } });
+    expect(fetchMock).toHaveBeenCalledTimes(2); // uma tentativa no principal e uma no fallback; sem retry de quota diária
+    expect(JSON.stringify((caught as TtsProviderError).quota)).not.toContain("texto privado");
+  });
+
+  it("reuses cached audio on a resumed chunk instead of calling Gemini again", async () => {
+    vi.stubEnv("STUDIO_LLM_GEMINI_KEY", "unit-test-key");
+    const fetchMock = vi.fn(async () => okResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await generateSpeechCached("Trecho reutilizável.");
+    const resumed = await generateSpeechCached("Trecho reutilizável.");
+    expect(first.cached).toBe(false);
+    expect(resumed).toMatchObject({ cached: true, model: DEFAULT_TTS_SETTINGS.primaryModel });
+    expect(resumed.audio).toEqual(first.audio);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("logs only HTTP status and a sanitized structural summary when audio is missing", async () => {
@@ -107,7 +173,7 @@ describe("Gemini TTS adapter", () => {
     vi.stubGlobal("fetch", vi.fn(async () => okResponse(sampleWav(16_000))));
 
     await expect(generateSpeech("Olá."))
-      .rejects.toThrow("WAV válido a 24 kHz");
+      .rejects.toThrow("principal e fallback falharam");
   });
 
   it("distinguishes a rejected key from a TTS service that is unavailable", async () => {
