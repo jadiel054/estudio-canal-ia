@@ -36,5 +36,5 @@ A recomendação oficial é backoff exponencial com jitter e limite máximo de t
 
 ### Pendente antes de produção
 - Aplicar `database/tts-cache-usage-migration.sql` no Neon e confirmar a disponibilidade dos novos contadores/cache. Essa alteração de banco não foi executada nesta tarefa.
-- Criar/mesclar a PR manualmente pelo proprietário e permitir o deploy correspondente.
+- A PR [#7 — Reduzir chamadas do Gemini TTS com cache e quotas](https://github.com/jadiel054/estudio-canal-ia/pull/7) está aberta e não foi mesclada. A revisão e o merge permanecem com o proprietário; o deploy correspondente ainda não foi realizado.
 - Após deploy e revisão dos indicadores, aguardar autorização explícita do usuário para um único render Short; nenhum teste real foi disparado nesta implementação.
