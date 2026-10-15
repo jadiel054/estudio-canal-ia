@@ -42,7 +42,12 @@ SAFE_RENDER_ERROR_CODES = {
     "callback_signature_invalid", "callback_payload_invalid", "callback_idempotency_failed",
     "callback_job_state_rejected", "callback_release_verification_failed", "callback_database_update_failed",
 }
-SAFE_CALLBACK_STAGE_CODES = {"assinatura", "validacao_payload", "idempotencia", "estado_job", "verificacao_release", "update_banco"}
+SAFE_CALLBACK_STAGE_CODES = {
+    "assinatura", "validacao_payload", "idempotencia", "estado_job", "verificacao_release", "update_banco",
+    "verificacao_release_metadados", "verificacao_release_consulta", "verificacao_release_resposta", "verificacao_release_estado",
+    "verificacao_assets_consulta", "verificacao_assets_resposta", "verificacao_asset_ausente", "verificacao_asset_estado",
+    "verificacao_asset_nome", "verificacao_asset_tamanho", "verificacao_asset_tipo",
+}
 
 def operation_from_path(path: str) -> str:
     operation = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("op", ["unknown"])[0]

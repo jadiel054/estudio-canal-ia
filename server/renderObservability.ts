@@ -14,7 +14,12 @@ export const RENDER_ERROR_CODES = [
 ] as const;
 export type RenderErrorCode = typeof RENDER_ERROR_CODES[number];
 
-export const RENDER_CALLBACK_STAGE_CODES = ["assinatura", "validacao_payload", "idempotencia", "estado_job", "verificacao_release", "update_banco"] as const;
+export const RENDER_CALLBACK_STAGE_CODES = [
+  "assinatura", "validacao_payload", "idempotencia", "estado_job", "verificacao_release", "update_banco",
+  "verificacao_release_metadados", "verificacao_release_consulta", "verificacao_release_resposta", "verificacao_release_estado",
+  "verificacao_assets_consulta", "verificacao_assets_resposta", "verificacao_asset_ausente", "verificacao_asset_estado",
+  "verificacao_asset_nome", "verificacao_asset_tamanho", "verificacao_asset_tipo",
+] as const;
 export type RenderCallbackStageCode = typeof RENDER_CALLBACK_STAGE_CODES[number];
 
 const CALLBACK_STAGE_ERROR_CODES: Record<RenderCallbackStageCode, RenderErrorCode> = {
@@ -23,6 +28,17 @@ const CALLBACK_STAGE_ERROR_CODES: Record<RenderCallbackStageCode, RenderErrorCod
   idempotencia: "callback_idempotency_failed",
   estado_job: "callback_job_state_rejected",
   verificacao_release: "callback_release_verification_failed",
+  verificacao_release_metadados: "callback_release_verification_failed",
+  verificacao_release_consulta: "callback_release_verification_failed",
+  verificacao_release_resposta: "callback_release_verification_failed",
+  verificacao_release_estado: "callback_release_verification_failed",
+  verificacao_assets_consulta: "callback_release_verification_failed",
+  verificacao_assets_resposta: "callback_release_verification_failed",
+  verificacao_asset_ausente: "callback_release_verification_failed",
+  verificacao_asset_estado: "callback_release_verification_failed",
+  verificacao_asset_nome: "callback_release_verification_failed",
+  verificacao_asset_tamanho: "callback_release_verification_failed",
+  verificacao_asset_tipo: "callback_release_verification_failed",
   update_banco: "callback_database_update_failed",
 };
 

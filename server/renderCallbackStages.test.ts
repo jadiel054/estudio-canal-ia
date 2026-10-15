@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { processRenderCallback } from "./renderPipeline";
+import { processRenderCallback, verifyOutputRelease, type RenderCallback } from "./renderPipeline";
 import {
   callbackStageDiagnostic,
   classifyRenderFailure,
@@ -76,6 +76,44 @@ async function expectStage(promise: Promise<unknown>, stageCode: RenderCallbackS
   await expect(promise).rejects.toMatchObject({ name: "RenderCallbackStageError", stageCode, errorCode });
 }
 
+function jsonResponse(body: unknown, ok = true): Response {
+  return { ok, json: async () => body } as Response;
+}
+
+function queuedFetch(...steps: Array<Response | Error>): typeof fetch {
+  let index = 0;
+  return vi.fn(async () => {
+    const step = steps[index++];
+    if (step instanceof Error) throw step;
+    return step as Response;
+  }) as unknown as typeof fetch;
+}
+
+function verifyReleaseWith(fetcher: typeof fetch) {
+  return processRenderCallback(qaCallback, {
+    verifyRelease: callbackValue => verifyOutputRelease(callbackValue, fetcher, "token-de-teste"),
+  });
+}
+
+const releaseOk = jsonResponse({ id: 4, draft: true });
+const assetOk = { id: 8, name: `estudio-${jobId}.mp4`, size: 220_000, state: "uploaded", content_type: "video/mp4" };
+const invalidJson = { ok: true, json: async () => { throw new Error("resposta privada"); } } as Response;
+const releaseVerificationCases: Array<[string, Array<Response | Error>, RenderCallbackStageCode]> = [
+  ["falha de rede ao consultar o Release", [new Error("token privado")], "verificacao_release_consulta"],
+  ["resposta HTTP do Release rejeitada", [jsonResponse({}, false)], "verificacao_release_consulta"],
+  ["corpo do Release ilegível", [invalidJson], "verificacao_release_resposta"],
+  ["Release não é o draft esperado", [jsonResponse({ id: 5, draft: false })], "verificacao_release_estado"],
+  ["falha de rede ao consultar assets", [releaseOk, new Error("token privado")], "verificacao_assets_consulta"],
+  ["resposta HTTP dos assets rejeitada", [releaseOk, jsonResponse([], false)], "verificacao_assets_consulta"],
+  ["corpo dos assets ilegível", [releaseOk, invalidJson], "verificacao_assets_resposta"],
+  ["corpo dos assets não é uma lista", [releaseOk, jsonResponse({})], "verificacao_assets_resposta"],
+  ["asset não encontrado", [releaseOk, jsonResponse([])], "verificacao_asset_ausente"],
+  ["asset ainda não enviado", [releaseOk, jsonResponse([{ ...assetOk, state: "new" }])], "verificacao_asset_estado"],
+  ["nome do asset divergente", [releaseOk, jsonResponse([{ ...assetOk, name: "outro.mp4" }])], "verificacao_asset_nome"],
+  ["tamanho do asset divergente", [releaseOk, jsonResponse([{ ...assetOk, size: 1 }])], "verificacao_asset_tamanho"],
+  ["tipo do asset não permitido", [releaseOk, jsonResponse([{ ...assetOk, content_type: "text/plain" }])], "verificacao_asset_tipo"],
+];
+
 describe("etapas seguras do callback de render", () => {
   it("classifica payload inválido sem preservar mensagem, corpo ou segredo", async () => {
     await expectStage(processRenderCallback({ message: "roteiro privado" }), "validacao_payload", "callback_payload_invalid");
@@ -92,6 +130,29 @@ describe("etapas seguras do callback de render", () => {
       "verificacao_release",
       "callback_release_verification_failed",
     );
+  });
+
+  it.each(releaseVerificationCases)("identifica o ramo da verificação do Release: %s", async (_caseName, steps, stageCode) => {
+    await expectStage(verifyReleaseWith(queuedFetch(...steps)), stageCode, "callback_release_verification_failed");
+  });
+
+  it("classifica metadados incompletos sem fazer consulta externa", async () => {
+    const fetcher = vi.fn();
+    await expectStage(
+      verifyOutputRelease({ ...qaCallback, fileName: undefined } as unknown as RenderCallback, fetcher as unknown as typeof fetch, "token-de-teste"),
+      "verificacao_release_metadados",
+      "callback_release_verification_failed",
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("aceita somente draft e metadados do asset que correspondem ao callback", async () => {
+    const fetcher = queuedFetch(
+      jsonResponse({ id: 4, draft: true }),
+      jsonResponse([{ id: 8, name: `estudio-${jobId}.mp4`, size: 220_000, state: "uploaded", content_type: "video/mp4" }]),
+    );
+    await expect(verifyOutputRelease(qaCallback as unknown as RenderCallback, fetcher, "token-de-teste")).resolves.toBeUndefined();
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it("classifica falhas de verificação de idempotência sem expor erro SQL", async () => {
@@ -138,5 +199,8 @@ describe("etapas seguras do callback de render", () => {
     expect(record).toEqual({ event: "falha_operacao_render", operation: "callback", errorCode: "callback_database_update_failed", httpStatus: 400, stageCode: "update_banco" });
     expect(JSON.stringify(record)).not.toContain("conteúdo editorial");
     expect(classifyRenderFailure("callback", new RenderCallbackStageError("update_banco"))).toMatchObject(diagnostic);
+    const releaseRecord = renderFailureLogRecord(callbackStageDiagnostic("verificacao_asset_nome"), 400);
+    expect(releaseRecord).toEqual({ event: "falha_operacao_render", operation: "callback", errorCode: "callback_release_verification_failed", httpStatus: 400, stageCode: "verificacao_asset_nome" });
+    expect(JSON.stringify(releaseRecord)).not.toContain("token privado");
   });
 });
