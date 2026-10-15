@@ -39,6 +39,32 @@ export function renderIntegrationStatus() {
   return { configured: neon && githubToken && hmacSecret, neon, githubToken, hmacSecret, geminiTts };
 }
 
+export type GitHubActionsConnectionStatus = "ok" | "unauthorized" | "forbidden" | "not_found" | "network_error";
+export type GitHubActionsConnectionResult = { ok: boolean; status: GitHubActionsConnectionStatus; httpStatus: number | null; latencyMs: number };
+
+/** Faz somente GET no endpoint de releases; não lê corpo nem expõe token, headers ou erros upstream. */
+export async function testGitHubActionsConnection(fetcher: typeof fetch = fetch): Promise<GitHubActionsConnectionResult> {
+  const started = Date.now();
+  let token: string;
+  try { token = requiredActionsToken(); }
+  catch { return { ok: false, status: "unauthorized", httpStatus: null, latencyMs: Date.now() - started }; }
+
+  try {
+    const response = await fetcher(`https://api.github.com/repos/${OWNER}/${REPOSITORY}/releases?per_page=1`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const status: GitHubActionsConnectionStatus = response.status >= 200 && response.status < 300 ? "ok"
+      : response.status === 401 ? "unauthorized"
+        : response.status === 403 ? "forbidden"
+          : response.status === 404 ? "not_found" : "network_error";
+    return { ok: status === "ok", status, httpStatus: response.status, latencyMs: Date.now() - started };
+  } catch {
+    return { ok: false, status: "network_error", httpStatus: null, latencyMs: Date.now() - started };
+  }
+}
+
 export async function startRenderPipeline(ideaId: string) {
   requiredActionsToken(); requiredRenderSecret();
   const pool = requirePool(); const connection = await pool.connect();
