@@ -254,18 +254,34 @@ export function validateRenderCallback(input: unknown): RenderCallback {
   return callback;
 }
 
-async function verifyOutputRelease(callback: RenderCallback) {
-  if (!callback.releaseId || !callback.assetId || !callback.fileName || !callback.fileSizeBytes) throw new Error("Asset de saída incompleto.");
-  const headers = { authorization: `Bearer ${requiredActionsToken()}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" };
-  const releaseResponse = await fetch(`https://api.github.com/repos/${OWNER}/${REPOSITORY}/releases/${callback.releaseId}`, { headers, signal: AbortSignal.timeout(12_000) });
-  if (!releaseResponse.ok) throw new Error("Não foi possível confirmar o draft release de saída no GitHub.");
-  const release = await releaseResponse.json() as { id: number; draft?: boolean };
-  if (release.id !== callback.releaseId || release.draft !== true) throw new Error("O asset de render não está em um GitHub Release privado em rascunho.");
-  const assetsResponse = await fetch(`https://api.github.com/repos/${OWNER}/${REPOSITORY}/releases/${callback.releaseId}/assets?per_page=100`, { headers, signal: AbortSignal.timeout(12_000) });
-  if (!assetsResponse.ok) throw new Error("Não foi possível confirmar o asset do MP4 no GitHub.");
-  const assets = await assetsResponse.json() as Array<{ id: number; name: string; size: number; state: string; content_type: string }>;
-  const asset = assets.find(item => item.id === callback.assetId);
-  if (!asset || asset.state !== "uploaded" || asset.name !== callback.fileName || asset.size !== callback.fileSizeBytes || !["video/mp4", "application/octet-stream"].includes(asset.content_type)) throw new Error("O asset do GitHub não corresponde ao MP4 e ao tamanho declarados no QA.");
+export async function verifyOutputRelease(callback: RenderCallback, fetcher: typeof fetch = fetch, actionsToken = requiredActionsToken()) {
+  if (!callback.releaseId || !callback.assetId || !callback.fileName || !callback.fileSizeBytes) throw new RenderCallbackStageError("verificacao_release_metadados");
+  const headers = { authorization: `Bearer ${actionsToken}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" };
+  let releaseResponse: Response;
+  try {
+    releaseResponse = await fetcher(`https://api.github.com/repos/${OWNER}/${REPOSITORY}/releases/${callback.releaseId}`, { headers, signal: AbortSignal.timeout(12_000) });
+  } catch { throw new RenderCallbackStageError("verificacao_release_consulta"); }
+  if (!releaseResponse.ok) throw new RenderCallbackStageError("verificacao_release_consulta");
+  let release: any;
+  try { release = await releaseResponse.json(); }
+  catch { throw new RenderCallbackStageError("verificacao_release_resposta"); }
+  if (!release || release.id !== callback.releaseId || release.draft !== true) throw new RenderCallbackStageError("verificacao_release_estado");
+
+  let assetsResponse: Response;
+  try {
+    assetsResponse = await fetcher(`https://api.github.com/repos/${OWNER}/${REPOSITORY}/releases/${callback.releaseId}/assets?per_page=100`, { headers, signal: AbortSignal.timeout(12_000) });
+  } catch { throw new RenderCallbackStageError("verificacao_assets_consulta"); }
+  if (!assetsResponse.ok) throw new RenderCallbackStageError("verificacao_assets_consulta");
+  let assets: any;
+  try { assets = await assetsResponse.json(); }
+  catch { throw new RenderCallbackStageError("verificacao_assets_resposta"); }
+  if (!Array.isArray(assets)) throw new RenderCallbackStageError("verificacao_assets_resposta");
+  const asset = assets.find((item: any) => item?.id === callback.assetId);
+  if (!asset) throw new RenderCallbackStageError("verificacao_asset_ausente");
+  if (asset.state !== "uploaded") throw new RenderCallbackStageError("verificacao_asset_estado");
+  if (asset.name !== callback.fileName) throw new RenderCallbackStageError("verificacao_asset_nome");
+  if (asset.size !== callback.fileSizeBytes) throw new RenderCallbackStageError("verificacao_asset_tamanho");
+  if (!["video/mp4", "application/octet-stream"].includes(asset.content_type)) throw new RenderCallbackStageError("verificacao_asset_tipo");
 }
 
 export async function processRenderCallback(rawInput: unknown, dependencies: RenderCallbackDependencies = {}) {
@@ -274,7 +290,10 @@ export async function processRenderCallback(rawInput: unknown, dependencies: Ren
   catch { throw new RenderCallbackStageError("validacao_payload"); }
   if (callback.status === "qa") {
     try { await (dependencies.verifyRelease ?? verifyOutputRelease)(callback); }
-    catch { throw new RenderCallbackStageError("verificacao_release"); }
+    catch (error) {
+      if (error instanceof RenderCallbackStageError) throw error;
+      throw new RenderCallbackStageError("verificacao_release");
+    }
   }
 
   let connection: any;
