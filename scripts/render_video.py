@@ -250,6 +250,8 @@ def make_slide(path: Path, manifest: dict, cue: dict, index: int, dims: tuple[in
     draw.text((pad, int(82 * scale)), section, font=section_font, fill=(185, 196, 217))
     main_top = int(140 * scale)
     main_bottom = height - int(155 * scale)
+    text_left = pad
+    text_max_width = width - 2 * pad
     if capture is not None:
         frame = (pad, main_top, width - pad, main_top + int((main_bottom-main_top) * 0.67))
         draw.rounded_rectangle(frame, radius=int(18 * scale), fill=(22, 31, 49), outline=(69, 83, 107), width=max(2, int(2*scale)))
@@ -259,20 +261,30 @@ def make_slide(path: Path, manifest: dict, cue: dict, index: int, dims: tuple[in
         draw = ImageDraw.Draw(image)
         text_y = frame[3] + int(24 * scale)
     else:
-        text_y = main_top + int(20 * scale)
+        focus_frame = (pad, main_top, width - pad, main_bottom)
+        draw.rounded_rectangle(focus_frame, radius=int(24 * scale), fill=(22, 31, 49), outline=(69, 83, 107), width=max(2, int(2*scale)))
+        draw.rounded_rectangle((focus_frame[0], focus_frame[1], focus_frame[0] + int(9*scale), focus_frame[3]), radius=int(5*scale), fill=(198, 255, 77))
+        section_index = cue.get("sectionIndex")
+        section_number = section_index + 1 if isinstance(section_index, int) and not isinstance(section_index, bool) else 1
+        label_font = font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(16 * scale))
+        inner_left = focus_frame[0] + int(34 * scale)
+        text_left = inner_left
+        draw.text((inner_left, focus_frame[1] + int(32 * scale)), f"TRECHO ATUAL  ·  SEÇÃO {section_number:02d}  ·  CUE {index+1:02d}", font=label_font, fill=(198, 255, 77))
+        text_y = focus_frame[1] + int(88 * scale)
+        text_max_width = focus_frame[2] - inner_left - int(34 * scale)
     body_font = font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int((46 if width > height else 56) * scale))
     cue_text = str(cue.get("text", "")).strip()
-    lines = wrap_pixels(draw, cue_text, body_font, width - 2*pad, max_lines=5)
+    lines = wrap_pixels(draw, cue_text, body_font, text_max_width, max_lines=5)
     line_h = int(body_font.size * 1.22)
     for line in lines:
-        draw.text((pad, text_y), line, font=body_font, fill=(245, 247, 252))
+        draw.text((text_left, text_y), line, font=body_font, fill=(245, 247, 252))
         text_y += line_h
     code_blocks = manifest.get("codeBlocks") or []
     if code_blocks:
         code = str(code_blocks[index % len(code_blocks)]).splitlines()[:6]
         code_y = min(text_y + int(18*scale), height - int(105*scale))
         mono = font("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", int(18 * scale))
-        box = (pad, code_y, width-pad, min(height-int(72*scale), code_y+int((len(code)+1)*29*scale)))
+        box = (text_left, code_y, width-pad, min(height-int(72*scale), code_y+int((len(code)+1)*29*scale)))
         if box[3] > box[1]:
             draw.rounded_rectangle(box, radius=int(12*scale), fill=(17, 25, 40), outline=(53, 71, 91), width=max(1, int(scale)))
             for line_index, code_line in enumerate(code):
@@ -292,6 +304,93 @@ def build_srt(entries: list[tuple[float, float, str]], path: Path):
     for number, (start, end, text) in enumerate(entries, 1):
         blocks.append(f"{number}\n{srt_time(start)} --> {srt_time(max(start+0.25, end))}\n{text.replace(chr(10), ' ').strip()}\n")
     path.write_text("\n".join(blocks), encoding="utf-8")
+
+def parse_srt_time(value: str) -> float:
+    match = re.fullmatch(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{1,3})", value.strip())
+    if not match:
+        raise RenderError("Timestamp SRT inválido para gerar legendas.", operation="render", error_code="manifest_invalid")
+    hours, minutes, seconds = (int(match.group(index)) for index in range(1, 4))
+    millis = int(match.group(4).ljust(3, "0"))
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000
+
+def parse_srt(path: Path) -> list[tuple[float, float, str]]:
+    content = path.read_text(encoding="utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+    entries = []
+    for block in re.split(r"\n\s*\n", content.strip()):
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        time_index = next((index for index, line in enumerate(lines) if "-->" in line), None)
+        if time_index is None:
+            continue
+        match = re.fullmatch(r"(.+?)\s+-->\s+(.+?)(?:\s+.*)?", lines[time_index])
+        if not match:
+            raise RenderError("Faixa de tempo SRT inválida para gerar legendas.", operation="render", error_code="manifest_invalid")
+        start = parse_srt_time(match.group(1))
+        end = parse_srt_time(match.group(2))
+        text = " ".join(lines[time_index + 1:]).strip()
+        if not text or end <= start:
+            raise RenderError("Cue SRT vazio ou com duração inválida.", operation="render", error_code="manifest_invalid")
+        entries.append((start, end, text))
+    if not entries:
+        raise RenderError("SRT sem cues para renderizar.", operation="render", error_code="manifest_invalid")
+    return entries
+
+def ass_time(seconds: float) -> str:
+    total_cs = max(0, int(round(seconds * 100)))
+    hours, rem = divmod(total_cs, 360_000)
+    minutes, rem = divmod(rem, 6_000)
+    secs, centiseconds = divmod(rem, 100)
+    return f"{hours}:{minutes:02}:{secs:02}.{centiseconds:02}"
+
+def caption_lines(text: str, width: int, font_size: int) -> list[str]:
+    selected_font = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
+    draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    max_width = int(width * 0.90)
+    lines: list[str] = []
+    current: list[str] = []
+    for word in text.split():
+        candidate = " ".join([*current, word])
+        too_many_words = len(current) >= 7
+        too_wide = bool(current) and draw.textbbox((0, 0), candidate, font=selected_font)[2] > max_width
+        if current and (too_many_words or too_wide):
+            lines.append(" ".join(current))
+            current = [word]
+        else:
+            current.append(word)
+    if current:
+        lines.append(" ".join(current))
+    return lines or [""]
+
+def build_ass(entries: list[tuple[float, float, str]], path: Path, dimensions: tuple[int, int]):
+    width, height = dimensions
+    font_size = max(1, int(width * 0.038))
+    margin_x = int(width * 0.05)
+    margin_v = int(height * 0.05)
+    outline = max(1, int(font_size * 0.05))
+    header = [
+        "[Script Info]", "ScriptType: v4.00+", f"PlayResX: {width}", f"PlayResY: {height}",
+        "ScaledBorderAndShadow: yes", "WrapStyle: 2", "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Default,DejaVu Sans,{font_size},&H00FFFFFF,&H000000FF,&H00101624,&H80000000,-1,0,1,{outline},1,2,{margin_x},{margin_x},{margin_v},1",
+        "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    dialogue_lines = []
+    for start, end, text in entries:
+        if end <= start:
+            raise RenderError("Cue SRT com duração inválida para ASS.", operation="render", error_code="manifest_invalid")
+        lines = caption_lines(text, width, font_size)
+        groups = [lines[index:index + 2] for index in range(0, len(lines), 2)]
+        weights = [max(1, sum(len(line) for line in group)) for group in groups]
+        total_weight = sum(weights)
+        duration = end - start
+        elapsed_weight = 0
+        for index, (group, weight) in enumerate(zip(groups, weights)):
+            segment_start = start + duration * elapsed_weight / total_weight
+            elapsed_weight += weight
+            segment_end = end if index == len(groups) - 1 else start + duration * elapsed_weight / total_weight
+            display_text = r"\N".join(line.replace("\\", "＼").replace("{", "｛").replace("}", "｝") for line in group)
+            dialogue_lines.append(f"Dialogue: 0,{ass_time(segment_start)},{ass_time(segment_end)},Default,,0,0,0,,{display_text}")
+    path.write_text("\n".join([*header, *dialogue_lines, ""]), encoding="utf-8")
 
 def callback(manifest: dict, status: str, progress: int, *, message: str | None = None, result: dict | None = None, diagnostic: RenderError | None = None):
     payload = {"eventId": str(uuid.uuid4()), "jobId": manifest["jobId"], "workflowRunId": RUN_ID, "status": status, "progress": progress}
@@ -374,21 +473,75 @@ def fetch_voice(job_id: str, chunk_index: int, output: Path) -> float:
         raise RenderError("Duração de um trecho TTS fora do limite seguro.", operation="voice", error_code="invalid_tts_duration")
     return duration
 
-def fetch_inputs(manifest: dict, directory: Path) -> list[Image.Image]:
-    images = []
+def fetch_inputs(manifest: dict, directory: Path) -> list[dict]:
+    captures = []
+    section_count = len(manifest.get("sections", []))
     for item in manifest.get("inputs", []):
-        if len(images) >= 5:
+        if len(captures) >= 5:
             break
+        if not isinstance(item, dict):
+            raise RenderError("Captura inválida no manifesto.", operation="input", error_code="manifest_invalid")
+        section_index = item.get("sectionIndex")
+        if section_index is not None and (not isinstance(section_index, int) or isinstance(section_index, bool) or section_index < 0 or section_index >= section_count):
+            raise RenderError("Índice de seção inválido na captura do manifesto.", operation="input", error_code="manifest_invalid")
         body = compact_json({"jobId": manifest["jobId"], "inputAssetId": item["id"]})
         data, headers = post_studio("/api/render?op=input", body, response_type="binary")
         digest = hashlib.sha256(data).hexdigest()
         if not hmac.compare_digest(digest, item["sha256"]) or len(data) != int(item["sizeBytes"]):
             raise RenderError("A captura transferida não corresponde ao manifesto.", operation="input", error_code="input_operation_failed")
-        path = directory / f"capture-{len(images):02d}.img"
+        path = directory / f"capture-{len(captures):02d}.img"
         path.write_bytes(data)
         image = load_capture(data, item["contentType"])
-        images.append(image)
-    return images
+        captures.append({"image": image, "sectionIndex": section_index})
+    return captures
+
+def cue_section_index(manifest: dict, cue: dict) -> int | None:
+    section_index = cue.get("sectionIndex")
+    sections = manifest.get("sections", [])
+    if isinstance(section_index, int) and not isinstance(section_index, bool) and 0 <= section_index < len(sections):
+        return section_index
+    section = cue.get("section")
+    try:
+        return sections.index(section)
+    except (ValueError, AttributeError):
+        return None
+
+def compose_section_captures(images: list[Image.Image]) -> Image.Image | None:
+    if not images:
+        return None
+    if len(images) == 1:
+        return images[0]
+    columns = 2
+    rows = (len(images) + columns - 1) // columns
+    canvas_size = (1200, 720)
+    margin = 16
+    tile_width = (canvas_size[0] - margin * (columns + 1)) // columns
+    tile_height = (canvas_size[1] - margin * (rows + 1)) // rows
+    canvas = Image.new("RGB", canvas_size, (22, 31, 49))
+    draw = ImageDraw.Draw(canvas)
+    for index, source in enumerate(images):
+        column, row = index % columns, index // columns
+        left, top = margin + column * (tile_width + margin), margin + row * (tile_height + margin)
+        draw.rounded_rectangle((left, top, left + tile_width, top + tile_height), radius=12, fill=(12, 18, 29), outline=(69, 83, 107), width=2)
+        thumb = ImageOps.contain(source, (tile_width - 20, tile_height - 20), method=Image.Resampling.LANCZOS)
+        canvas.paste(thumb, (left + (tile_width - thumb.width) // 2, top + (tile_height - thumb.height) // 2))
+        draw = ImageDraw.Draw(canvas)
+    return canvas
+
+def select_capture_for_cue(manifest: dict, cue: dict, cue_index: int, captures: list[dict]) -> Image.Image | None:
+    section_index = cue_section_index(manifest, cue)
+    if section_index is not None:
+        prior_cues = manifest.get("cues", [])[:cue_index]
+        first_in_section = not any(cue_section_index(manifest, prior) == section_index for prior in prior_cues)
+        if first_in_section:
+            mapped = [capture["image"] for capture in captures if capture.get("sectionIndex") == section_index]
+            if mapped:
+                return compose_section_captures(mapped)
+    if cue_index == 0:
+        unassigned = next((capture for capture in captures if capture.get("sectionIndex") is None), None)
+        if unassigned:
+            return unassigned["image"]
+    return None
 
 def make_music_track(duration: float, output: Path):
     duration = max(duration, 2.0)
@@ -501,7 +654,7 @@ def create_video(manifest: dict, directory: Path) -> tuple[Path, Path, float]:
             subtitles.append((time_cursor, time_cursor + segment_duration, str(cue["text"])))
         durations.append(segment_duration)
         slide = directory / f"slide-{index:03d}.png"
-        capture = captures[index % len(captures)] if captures else None
+        capture = select_capture_for_cue(manifest, cue, index, captures)
         make_slide(slide, manifest, cue, index, dimensions, capture)
         slides.append(slide)
         time_cursor += segment_duration
@@ -513,6 +666,8 @@ def create_video(manifest: dict, directory: Path) -> tuple[Path, Path, float]:
 
     srt_path = directory / "captions.srt"
     build_srt(subtitles, srt_path)
+    ass_path = directory / "captions.ass"
+    build_ass(parse_srt(srt_path), ass_path, dimensions)
     concat_path = directory / "slides.txt"
     lines = []
     for slide, duration in zip(slides, durations):
@@ -538,7 +693,8 @@ def create_video(manifest: dict, directory: Path) -> tuple[Path, Path, float]:
 
     filename = f"estudio-{JOB_ID}.mp4"
     final_path = directory / filename
-    subtitle_filter = f"subtitles=filename='{srt_path}':fontsdir='/usr/share/fonts/truetype/dejavu':force_style='FontName=DejaVu Sans,FontSize=26,PrimaryColour=&H00FFFFFF,OutlineColour=&H00100000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=24'"
+    ass_filter_path = str(ass_path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    subtitle_filter = f"subtitles=filename='{ass_filter_path}':fontsdir='/usr/share/fonts/truetype/dejavu'"
     run(["ffmpeg", "-y", "-i", str(scene_video), "-i", str(audio_path), "-vf", subtitle_filter, "-map", "0:v:0", "-map", "1:a:0", "-shortest", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(final_path)], "renderizar MP4 e queimar legendas")
     return final_path, srt_path, time_cursor
 

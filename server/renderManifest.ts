@@ -1,4 +1,4 @@
-export type NarrationCue = { index: number; section: string; text: string };
+export type NarrationCue = { index: number; sectionIndex: number; section: string; text: string };
 export type NarrationChunk = { index: number; cueIndices: number[]; text: string };
 export type ScriptVisuals = { cues: NarrationCue[]; codeBlocks: string[]; sections: string[] };
 export const MAX_TTS_CHUNK_CHARS = 1_100;
@@ -69,10 +69,10 @@ export function extractScriptVisuals(content: string): ScriptVisuals {
   if (!sections.length) throw new Error("O roteiro aprovado não contém texto de narração fora dos blocos de código.");
 
   const cues: NarrationCue[] = [];
-  for (const section of sections) {
+  for (const [sectionIndex, section] of sections.entries()) {
     for (const paragraphText of section.paragraphs) {
       for (const sentence of splitSentences(paragraphText)) {
-        if (sentence) cues.push({ index: cues.length, section: section.title, text: sentence });
+        if (sentence) cues.push({ index: cues.length, sectionIndex, section: section.title, text: sentence });
       }
     }
   }

@@ -177,16 +177,93 @@ class RenderWorkerTests(unittest.TestCase):
             worker.build_srt([(0, 2.5, "Texto de teste")], path)
             self.assertIn("00:00:00,000 --> 00:00:02,500", path.read_text(encoding="utf-8"))
 
+    def test_three_long_srt_cues_create_proportional_two_line_ass_at_video_resolution(self):
+        entries = [
+            (0.0, 4.8, "Agora vamos validar o endpoint de webhook com uma requisição local e verificar o código de resposta antes de seguir para a próxima etapa."),
+            (5.1, 9.3, "Em seguida o receptor confirma o evento, rejeita o payload inválido e limita o corpo maior sem enviar dados para serviços externos."),
+            (9.6, 14.5, "Por fim registramos os resultados dos testes no roteiro e destacamos a seção atual para que cada slide mantenha contexto visual claro."),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            srt_path = Path(directory) / "long-captions.srt"
+            ass_path = Path(directory) / "captions.ass"
+            worker.build_srt(entries, srt_path)
+            parsed = worker.parse_srt(srt_path)
+            worker.build_ass(parsed, ass_path, (1080, 1920))
+            ass_text = ass_path.read_text(encoding="utf-8")
+
+        self.assertIn("PlayResX: 1080", ass_text)
+        self.assertIn("PlayResY: 1920", ass_text)
+        style = next(line for line in ass_text.splitlines() if line.startswith("Style: Default,"))
+        font_size = int(style.split(",")[2])
+        self.assertLessEqual(font_size, 1080 * 0.04)
+        dialogues = [line for line in ass_text.splitlines() if line.startswith("Dialogue: ")]
+        self.assertGreater(len(dialogues), len(entries))
+
+        def ass_seconds(value):
+            hours, minutes, seconds_cs = value.split(":")
+            seconds, centiseconds = seconds_cs.split(".")
+            return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(centiseconds) / 100
+
+        parsed_dialogues = []
+        for line in dialogues:
+            fields = line.split(",", 9)
+            display_lines = fields[9].split(r"\N")
+            self.assertLessEqual(len(display_lines), 2)
+            self.assertTrue(all(len(display_line.split()) <= 7 for display_line in display_lines))
+            parsed_dialogues.append((ass_seconds(fields[1]), ass_seconds(fields[2]), fields[9]))
+        for cue_start, cue_end, _ in entries:
+            cue_events = [event for event in parsed_dialogues if event[0] >= cue_start - 0.01 and event[1] <= cue_end + 0.01]
+            self.assertGreaterEqual(len(cue_events), 2)
+            self.assertAlmostEqual(cue_events[0][0], cue_start, places=2)
+            self.assertAlmostEqual(cue_events[-1][1], cue_end, places=2)
+            for left, right in zip(cue_events, cue_events[1:]):
+                self.assertAlmostEqual(left[1], right[0], places=2)
+            weights = [len(text.replace(r"\N", " ")) for _, _, text in cue_events]
+            durations = [end - start for start, end, _ in cue_events]
+            self.assertTrue(all(abs(duration / sum(durations) - weight / sum(weights)) < 0.01 for duration, weight in zip(durations, weights)))
+
+    def test_capture_is_selected_by_section_and_unassigned_capture_is_used_once(self):
+        from PIL import Image
+        manifest = {
+            "sections": ["Gancho", "Demonstração"],
+            "cues": [
+                {"index": 0, "sectionIndex": 0, "section": "Gancho"},
+                {"index": 1, "sectionIndex": 0, "section": "Gancho"},
+                {"index": 2, "sectionIndex": 1, "section": "Demonstração"},
+                {"index": 3, "sectionIndex": 1, "section": "Demonstração"},
+            ],
+        }
+        general_image = Image.new("RGB", (8, 8), (10, 20, 30))
+        section_image = Image.new("RGB", (8, 8), (30, 20, 10))
+        section_image_2 = Image.new("RGB", (8, 8), (20, 30, 10))
+        general = [{"image": general_image, "sectionIndex": None}]
+        mapped = [{"image": section_image, "sectionIndex": 1}]
+        mapped_many = [*mapped, {"image": section_image_2, "sectionIndex": 1}]
+
+        self.assertIs(worker.select_capture_for_cue(manifest, manifest["cues"][0], 0, general), general_image)
+        self.assertIsNone(worker.select_capture_for_cue(manifest, manifest["cues"][1], 1, general))
+        self.assertIsNone(worker.select_capture_for_cue(manifest, manifest["cues"][2], 2, general))
+        self.assertIsNone(worker.select_capture_for_cue(manifest, manifest["cues"][0], 0, mapped))
+        self.assertIs(section_image, worker.select_capture_for_cue(manifest, manifest["cues"][2], 2, mapped))
+        self.assertIsNone(worker.select_capture_for_cue(manifest, manifest["cues"][3], 3, mapped))
+        montage = worker.select_capture_for_cue(manifest, manifest["cues"][2], 2, mapped_many)
+        self.assertEqual(montage.size, (1200, 720))
+
     def test_slide_is_rendered_at_target_dimensions(self):
         from PIL import Image
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "slide.png"
             manifest = {"format": "Short", "codeBlocks": ["print('oi')"]}
-            cue = {"section": "Demonstração", "text": "Este é um teste de composição de captura e código."}
+            cue = {"sectionIndex": 0, "section": "Demonstração", "text": "Este é um teste de composição de captura e código."}
             capture = Image.new("RGB", (800, 600), (30, 90, 120))
             worker.make_slide(path, manifest, cue, 0, (1080, 1920), capture)
             with Image.open(path) as image:
                 self.assertEqual(image.size, (1080, 1920))
+            focused_path = Path(directory) / "focused-slide.png"
+            worker.make_slide(focused_path, manifest, cue, 1, (1080, 1920), None)
+            with Image.open(focused_path) as focused:
+                self.assertEqual(focused.size, (1080, 1920))
+                self.assertNotEqual(focused.getpixel((60, 500)), capture.getpixel((0, 0)))
 
     def test_qa_checks_real_streams_captions_and_short_length(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -234,6 +311,9 @@ class RenderWorkerTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory(prefix="estudio-render-test-") as directory:
                 video, captions, _ = worker.create_video(manifest, Path(directory))
+                ass_path = Path(directory) / "captions.ass"
+                self.assertTrue(ass_path.is_file())
+                self.assertIn("PlayResX: 1080", ass_path.read_text(encoding="utf-8"))
                 probe = worker.ffprobe(video)
                 checks, duration, size = worker.qa_result(video, captions, probe, manifest)
                 self.assertTrue(video.is_file())

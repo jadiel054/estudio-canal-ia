@@ -111,9 +111,17 @@ export type RenderManifest = {
   format: "Longo" | "Short" | "Live"; cues: ReturnType<typeof extractScriptVisuals>["cues"];
   ttsChunks: ReturnType<typeof buildNarrationChunks>;
   codeBlocks: string[]; sections: string[]; references: string[]; voiceMode: "TTS" | "Música + texto";
-  inputs: Array<{ id: string; fileName: string; contentType: string; sizeBytes: number; sha256: string; label: string }>;
+  inputs: Array<{ id: string; fileName: string; contentType: string; sizeBytes: number; sha256: string; label: string; sectionIndex: number | null }>;
   tts: { primaryModel: string; fallbackModel: string; voice: string };
 };
+
+function sectionIndexForInput(state: any, inputId: string, scriptId: string, scriptVersion: number, sectionCount: number): number | null {
+  const asset = Array.isArray(state?.assets) ? state.assets.find((item: any) => item.inputAssetId === inputId && item.scriptId === scriptId && item.scriptVersion === scriptVersion) : undefined;
+  const sectionIndex = asset?.sectionIndex;
+  if (sectionIndex === undefined || sectionIndex === null) return null;
+  if (!Number.isInteger(sectionIndex) || sectionIndex < 0 || sectionIndex >= sectionCount) throw new Error("Índice de seção inválido associado a uma captura do roteiro.");
+  return sectionIndex;
+}
 
 export async function getSignedRenderManifest(jobId: string) {
   if (!UUID_PATTERN.test(jobId)) throw new Error("Job de render inválido.");
@@ -133,7 +141,7 @@ export async function getSignedRenderManifest(jobId: string) {
     title: idea.title, format: idea.format, cues: visuals.cues, ttsChunks, codeBlocks: visuals.codeBlocks, sections: visuals.sections,
     references: (idea.captureUrls ?? []).filter((url: unknown): url is string => typeof url === "string" && /^https:\/\//i.test(url)).slice(0, 10),
     voiceMode,
-    inputs: inputResult.rows.map(input => ({ id: input.id, fileName: input.file_name, contentType: input.content_type, sizeBytes: Number(input.file_size_bytes), sha256: input.sha256, label: input.file_name })),
+    inputs: inputResult.rows.map(input => ({ id: input.id, fileName: input.file_name, contentType: input.content_type, sizeBytes: Number(input.file_size_bytes), sha256: input.sha256, label: input.file_name, sectionIndex: sectionIndexForInput(state, input.id, script.id, script.version, visuals.sections.length) })),
     tts: { primaryModel: tts.primaryModel, fallbackModel: tts.fallbackModel, voice: tts.voice },
   };
   const body = JSON.stringify(manifest); const hash = createHash("sha256").update(body).digest("hex");
@@ -385,7 +393,7 @@ export async function uploadRenderInput(params: { ideaId: string; fileName: stri
     if (total >= 5 || bytes + data.length > 8 * 1024 * 1024) throw new Error("Limite atingido: até 5 capturas e 8 MB no total por versão do roteiro.");
     const sha256 = createHash("sha256").update(data).digest("hex");
     await connection.query("INSERT INTO studio_render_inputs (id, idea_id, script_id, script_version, file_name, content_type, file_size_bytes, sha256, data, uploaded_by) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)", [id, idea.id, script.id, script.version, fileName, params.contentType, data.length, sha256, data, ownerId]);
-    state.assets = [{ id, inputAssetId: id, scriptId: script.id, scriptVersion: script.version, type: "Tela", label: `Captura: ${fileName}`, license: "Original · enviada pelo dono", status: "Pronto", fileName, contentType: params.contentType, sizeBytes: data.length, sha256 }, ...(state.assets ?? [])];
+    state.assets = [{ id, inputAssetId: id, scriptId: script.id, scriptVersion: script.version, sectionIndex: null, type: "Tela", label: `Captura: ${fileName}`, license: "Original · enviada pelo dono", status: "Pronto", fileName, contentType: params.contentType, sizeBytes: data.length, sha256 }, ...(state.assets ?? [])];
     const now = new Date().toISOString(); state.audit = [{ id: randomUUID(), actor: "Você", action: "Captura de produção enviada", target: idea.title, at: now, detail: `${fileName} · ${data.length} bytes · SHA-256 ${sha256.slice(0, 12)}…` }, ...(state.audit ?? [])].slice(0, 500);
     const oldVersion = stateVersion(state); state.version = oldVersion + 1;
     const saved = await connection.query("UPDATE app_settings SET value = $1::jsonb, updated_at = NOW() WHERE key = 'studio_state' AND COALESCE((value->>'version')::int, 0) = $2", [JSON.stringify(state), oldVersion]);

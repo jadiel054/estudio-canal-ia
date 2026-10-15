@@ -25,6 +25,14 @@ describe("validação do estado do estúdio", () => {
     expect(parsed.version).toBe(3);
   });
 
+  it("preserva sectionIndex zero-based em capturas e rejeita índices fora do manifesto", () => {
+    const state: any = validState();
+    state.assets = [{ id: "a1", scriptId: "s1", type: "Tela", label: "Captura", license: "Original", status: "Pronto", sectionIndex: 1 }];
+    expect(parseStudioState(state).assets[0].sectionIndex).toBe(1);
+    state.assets[0].sectionIndex = 30;
+    expect(() => parseStudioState(state)).toThrow(/sectionIndex/);
+  });
+
   it("rejeita estágio editorial desconhecido em vez de gravar qualquer coisa", () => {
     const state = validState();
     state.ideas[0].status = "qualquer_coisa";

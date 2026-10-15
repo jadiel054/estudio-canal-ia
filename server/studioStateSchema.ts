@@ -86,6 +86,8 @@ export const assetSchema = z.object({
   githubAssetId: z.number().int().positive().optional(),
   inputAssetId: z.string().uuid().optional(),
   scriptVersion: z.number().int().positive().optional(),
+  /** Índice zero-based da seção do roteiro associada a uma captura. */
+  sectionIndex: z.number().int().min(0).max(29).nullable().optional(),
   example: z.boolean().optional(),
 });
 
