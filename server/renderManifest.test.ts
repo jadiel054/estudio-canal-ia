@@ -6,6 +6,7 @@ describe("render manifest script extraction", () => {
     const result = extractScriptVisuals(`# Gancho\nOlá, devs! Vamos testar.\n\n# Demonstração\nAbra o terminal e rode o comando.\n\n\`\`\`ts\nconst ok = true;\n\`\`\``);
     expect(result.sections).toEqual(["Gancho", "Demonstração"]);
     expect(result.cues.map(cue => cue.text)).toEqual(["Olá, devs!", "Vamos testar.", "Abra o terminal e rode o comando."]);
+    expect(result.cues.map(cue => cue.sectionIndex)).toEqual([0, 0, 1]);
     expect(result.codeBlocks).toEqual(["const ok = true;"]);
   });
 
@@ -29,7 +30,7 @@ describe("render manifest script extraction", () => {
 
 describe("TTS chunk planning", () => {
   it("groups many caption cues into roughly 800–1,200 character calls without losing caption mappings", () => {
-    const cues = Array.from({ length: 20 }, (_, index) => ({ index, section: index < 10 ? "A" : "B", text: `Frase técnica número ${index + 1} sobre uma integração que vamos validar com cuidado.` }));
+    const cues = Array.from({ length: 20 }, (_, index) => ({ index, sectionIndex: index < 10 ? 0 : 1, section: index < 10 ? "A" : "B", text: `Frase técnica número ${index + 1} sobre uma integração que vamos validar com cuidado.` }));
     const chunks = buildNarrationChunks(cues);
     expect(chunks.length).toBeLessThan(cues.length);
     expect(chunks.map(chunk => chunk.cueIndices).flat()).toEqual(cues.map(cue => cue.index));
@@ -38,7 +39,7 @@ describe("TTS chunk planning", () => {
   });
 
   it("keeps a cue whole and rejects invalid chunk settings", () => {
-    const cues = [{ index: 0, section: "Gancho", text: "Uma fala curta." }];
+    const cues = [{ index: 0, sectionIndex: 0, section: "Gancho", text: "Uma fala curta." }];
     expect(buildNarrationChunks(cues)).toEqual([{ index: 0, cueIndices: [0], text: "Uma fala curta." }]);
     expect(() => buildNarrationChunks(cues, 100)).toThrow("Limite de bloco TTS inválido");
     expect(() => buildNarrationChunks([])).toThrow("Quantidade de cues fora dos limites");
