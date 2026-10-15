@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { validateRenderCallback } from "./renderPipeline";
 
 const jobId = "123e4567-e89b-42d3-a456-426614174000";
@@ -61,5 +63,13 @@ describe("callback do render real", () => {
     expect(() => validateRenderCallback({ ...failed, quotaMetric: "quota label: roteiro confidencial" })).toThrow("Identificador de quota");
     expect(() => validateRenderCallback({ ...failed, retryAfterMs: -1 })).toThrow("Retry-After");
     expect(() => validateRenderCallback({ ...failed, providerModel: "segredo" })).toThrow("Modelo TTS");
+  });
+
+  it("declara os status HTTP usados pelo callback de falha na migration Neon", () => {
+    const sql = readFileSync(resolve(process.cwd(), "database/render-callback-status-migration.sql"), "utf8");
+    expect(sql).toMatch(/ADD COLUMN IF NOT EXISTS http_status INTEGER/i);
+    expect(sql).toMatch(/ADD COLUMN IF NOT EXISTS upstream_status INTEGER/i);
+    expect(sql).toMatch(/http_status IS NULL OR http_status BETWEEN 100 AND 599/i);
+    expect(sql).toMatch(/upstream_status IS NULL OR upstream_status BETWEEN 100 AND 599/i);
   });
 });
