@@ -39,30 +39,40 @@ export function renderIntegrationStatus() {
   return { configured: neon && githubToken && hmacSecret, neon, githubToken, hmacSecret, geminiTts };
 }
 
-export type GitHubActionsConnectionStatus = "ok" | "unauthorized" | "forbidden" | "not_found" | "network_error";
-export type GitHubActionsConnectionResult = { ok: boolean; status: GitHubActionsConnectionStatus; httpStatus: number | null; latencyMs: number };
+export type GitHubActionsConnectionResult = { listStatus: number | null; draftFound: boolean; getByIdStatus: number | null; latencyMs: number };
 
-/** Faz somente GET no endpoint de releases; não lê corpo nem expõe token, headers ou erros upstream. */
+function firstReleaseProbeFields(value: unknown): { releaseId: number | null; draftFound: boolean } {
+  const first = Array.isArray(value) ? value[0] : null;
+  if (!first || typeof first !== "object") return { releaseId: null, draftFound: false };
+  const release = first as Record<string, unknown>;
+  const releaseId = typeof release.id === "number" && Number.isSafeInteger(release.id) && release.id > 0 ? release.id : null;
+  return { releaseId, draftFound: release.draft === true };
+}
+
+/** Probes read-only list/get endpoints; only the first release's id/draft are extracted and no response body or secret is logged or returned. */
 export async function testGitHubActionsConnection(fetcher: typeof fetch = fetch): Promise<GitHubActionsConnectionResult> {
   const started = Date.now();
+  const emptyResult = (listStatus: number | null, draftFound = false, getByIdStatus: number | null = null): GitHubActionsConnectionResult => ({ listStatus, draftFound, getByIdStatus, latencyMs: Date.now() - started });
   let token: string;
   try { token = requiredActionsToken(); }
-  catch { return { ok: false, status: "unauthorized", httpStatus: null, latencyMs: Date.now() - started }; }
+  catch { return emptyResult(null); }
+
+  const headers = { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" };
+  const request = (url: string) => fetcher(url, { method: "GET", headers, signal: AbortSignal.timeout(10_000) });
+  let listResponse: Response;
+  try { listResponse = await request(`https://api.github.com/repos/${OWNER}/${REPOSITORY}/releases?per_page=1`); }
+  catch { return emptyResult(null); }
+  if (listResponse.status !== 200) return emptyResult(listResponse.status);
+
+  let firstRelease: { releaseId: number | null; draftFound: boolean };
+  try { firstRelease = firstReleaseProbeFields(await listResponse.json()); }
+  catch { return emptyResult(200); }
+  if (!firstRelease.draftFound || firstRelease.releaseId === null) return emptyResult(200, firstRelease.draftFound);
 
   try {
-    const response = await fetcher(`https://api.github.com/repos/${OWNER}/${REPOSITORY}/releases?per_page=1`, {
-      method: "GET",
-      headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" },
-      signal: AbortSignal.timeout(10_000),
-    });
-    const status: GitHubActionsConnectionStatus = response.status >= 200 && response.status < 300 ? "ok"
-      : response.status === 401 ? "unauthorized"
-        : response.status === 403 ? "forbidden"
-          : response.status === 404 ? "not_found" : "network_error";
-    return { ok: status === "ok", status, httpStatus: response.status, latencyMs: Date.now() - started };
-  } catch {
-    return { ok: false, status: "network_error", httpStatus: null, latencyMs: Date.now() - started };
-  }
+    const byIdResponse = await request(`https://api.github.com/repos/${OWNER}/${REPOSITORY}/releases/${firstRelease.releaseId}`);
+    return emptyResult(200, true, byIdResponse.status);
+  } catch { return emptyResult(200, true); }
 }
 
 export async function startRenderPipeline(ideaId: string) {

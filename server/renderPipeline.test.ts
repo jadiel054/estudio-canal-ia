@@ -84,64 +84,103 @@ describe("teste somente de leitura da conexão GitHub Actions", () => {
     vi.restoreAllMocks();
   });
 
-  function responseMock(status: number) {
-    const body = { json: vi.fn(), text: vi.fn() };
-    const response = { status, json: body.json, text: body.text } as unknown as Response;
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => response);
-    return { fetchMock, body };
+  function responseMock(status: number, payload?: unknown) {
+    const json = vi.fn(async () => payload);
+    const text = vi.fn();
+    return { response: { status, json, text } as unknown as Response, json, text };
   }
 
-  it("confirma acesso real com GET de releases e não retorna credencial, headers ou corpo", async () => {
-    vi.stubEnv("GITHUB_ACTIONS_TOKEN", token);
-    const { fetchMock, body } = responseMock(200);
-    const result = await testGitHubActionsConnection(fetchMock as typeof fetch);
-    expect(result).toMatchObject({ ok: true, status: "ok", httpStatus: 200 });
-    expect(result.latencyMs).toBeGreaterThanOrEqual(0);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, request] = fetchMock.mock.calls[0];
-    expect(url).toBe(endpoint);
-    expect(request?.method).toBe("GET");
-    const headers = new Headers(request?.headers);
+  function sequencedFetch(responses: Array<Response | Error>) {
+    let index = 0;
+    return vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
+      const next = responses[index++];
+      if (next instanceof Error) throw next;
+      return next!;
+    });
+  }
+
+  function expectRequest(fetchMock: ReturnType<typeof sequencedFetch>, index: number, url: string) {
+    const [requestUrl, options] = fetchMock.mock.calls[index]!;
+    expect(requestUrl).toBe(url);
+    expect(options?.method).toBe("GET");
+    const headers = new Headers(options?.headers);
     expect(headers.get("authorization")).toBe(`Bearer ${token}`);
     expect(headers.get("accept")).toBe("application/vnd.github+json");
-    expect(request?.body).toBeUndefined();
-    expect(body.json).not.toHaveBeenCalled();
-    expect(body.text).not.toHaveBeenCalled();
-    expect(JSON.stringify(result)).not.toContain(token);
-    expect(result).not.toHaveProperty("headers");
-    expect(result).not.toHaveProperty("body");
-  });
+    expect(options?.body).toBeUndefined();
+  }
 
-  it.each([
-    [401, "unauthorized"],
-    [403, "forbidden"],
-    [404, "not_found"],
-    [503, "network_error"],
-  ] as const)("mapeia HTTP %i para %s sem ler corpo", async (httpStatus, status) => {
+  it("faz listagem 200 e GET por ID 200 para um draft, sem devolver ID, corpo ou segredo", async () => {
     vi.stubEnv("GITHUB_ACTIONS_TOKEN", token);
-    const { fetchMock, body } = responseMock(httpStatus);
+    const list = responseMock(200, [{ id: 987654, draft: true, name: "não retornar", body: "não retornar", tag_name: "não retornar" }]);
+    const byId = responseMock(200, { id: 987654, draft: true, title: "não ler" });
+    const fetchMock = sequencedFetch([list.response, byId.response]);
     const result = await testGitHubActionsConnection(fetchMock as typeof fetch);
-    expect(result).toMatchObject({ ok: false, status, httpStatus });
-    expect(body.json).not.toHaveBeenCalled();
-    expect(body.text).not.toHaveBeenCalled();
-    expect(JSON.stringify(result)).not.toContain(token);
+
+    expect(result).toMatchObject({ listStatus: 200, draftFound: true, getByIdStatus: 200 });
+    expect(result.latencyMs).toBeGreaterThanOrEqual(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expectRequest(fetchMock, 0, endpoint);
+    expectRequest(fetchMock, 1, `${endpoint.replace("?per_page=1", "/987654")}`);
+    expect(list.json).toHaveBeenCalledTimes(1);
+    expect(list.text).not.toHaveBeenCalled();
+    expect(byId.json).not.toHaveBeenCalled();
+    expect(byId.text).not.toHaveBeenCalled();
+    for (const secretOrBody of [token, "não retornar", "não ler", "987654"]) expect(JSON.stringify(result)).not.toContain(secretOrBody);
+    expect(Object.keys(result).sort()).toEqual(["draftFound", "getByIdStatus", "latencyMs", "listStatus"]);
   });
 
-  it("converte falha de rede/timeout em network_error sem expor a exceção", async () => {
+  it("distingue listagem 200 e GET por ID 404 para um draft listado", async () => {
     vi.stubEnv("GITHUB_ACTIONS_TOKEN", token);
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => { throw new Error(`network failure containing ${token}`); });
+    const list = responseMock(200, [{ id: 43, draft: true, title: "privado" }]);
+    const byId = responseMock(404, { message: "não ler nem devolver" });
+    const fetchMock = sequencedFetch([list.response, byId.response]);
     const result = await testGitHubActionsConnection(fetchMock as typeof fetch);
-    expect(result).toMatchObject({ ok: false, status: "network_error", httpStatus: null });
-    expect(JSON.stringify(result)).not.toContain(token);
-    expect(JSON.stringify(result)).not.toContain("network failure");
+    expect(result).toMatchObject({ listStatus: 200, draftFound: true, getByIdStatus: 404 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expectRequest(fetchMock, 1, `${endpoint.replace("?per_page=1", "/43")}`);
+    expect(byId.json).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("privado");
   });
 
-  it("não chama a API e retorna somente estado allowlisted quando o PAT não está configurado", async () => {
+  it("não faz GET por ID quando a listagem 200 não tem draft", async () => {
+    vi.stubEnv("GITHUB_ACTIONS_TOKEN", token);
+    const list = responseMock(200, [{ id: 12, draft: false, title: "não retornar", body: "não retornar" }]);
+    const fetchMock = sequencedFetch([list.response]);
+    const result = await testGitHubActionsConnection(fetchMock as typeof fetch);
+    expect(result).toMatchObject({ listStatus: 200, draftFound: false, getByIdStatus: null });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(list.json).toHaveBeenCalledTimes(1);
+    expect(list.text).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("não retornar");
+  });
+
+  it.each([401, 403, 404, 503])("preserva status HTTP %i da listagem e não tenta ler corpo nem buscar ID", async listStatus => {
+    vi.stubEnv("GITHUB_ACTIONS_TOKEN", token);
+    const list = responseMock(listStatus, { secret: "não retornar" });
+    const fetchMock = sequencedFetch([list.response]);
+    const result = await testGitHubActionsConnection(fetchMock as typeof fetch);
+    expect(result).toMatchObject({ listStatus, draftFound: false, getByIdStatus: null });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(list.json).not.toHaveBeenCalled();
+    expect(list.text).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("não retornar");
+  });
+
+  it("mantém getByIdStatus null em falha de rede após encontrar draft", async () => {
+    vi.stubEnv("GITHUB_ACTIONS_TOKEN", token);
+    const list = responseMock(200, [{ id: 91, draft: true }]);
+    const fetchMock = sequencedFetch([list.response, new Error(`network failure ${token}`)]);
+    const result = await testGitHubActionsConnection(fetchMock as typeof fetch);
+    expect(result).toMatchObject({ listStatus: 200, draftFound: true, getByIdStatus: null });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(result)).not.toContain(token);
+  });
+
+  it("retorna status null sem chamar API quando o PAT está ausente", async () => {
     vi.stubEnv("GITHUB_ACTIONS_TOKEN", "");
     const fetchMock = vi.fn();
     const result = await testGitHubActionsConnection(fetchMock as typeof fetch);
-    expect(result).toMatchObject({ ok: false, status: "unauthorized", httpStatus: null });
+    expect(result).toMatchObject({ listStatus: null, draftFound: false, getByIdStatus: null });
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(Object.keys(result).sort()).toEqual(["httpStatus", "latencyMs", "ok", "status"]);
   });
 });
