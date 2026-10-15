@@ -1,50 +1,64 @@
 # Prova ponta a ponta da Fase 1 — resultado
 
-**Estado: PAUSADA antes de criar conteúdo ou iniciar chamadas de produção.** A autorização explícita foi respeitada dentro do limite solicitado: ao encontrar um bug que impediria a verificação do cache, a prova foi interrompida, sem iniciar pauta, roteiro, amostra TTS ou render. A correção está na [PR #8](https://github.com/jadiel054/estudio-canal-ia/pull/8), aberta e sem merge. Ao abrir a PR, o Vercel iniciou automaticamente um preview; não houve deploy manual nem alteração de produção.
+**Resultado: FALHA PARCIAL.** A amostra TTS comprovou o cache; a pauta, o roteiro, o Portão 1 e um único render real foram executados. O MP4 foi criado e enviado a um draft Release privado, mas o callback final de QA recebeu HTTP 400. O job não chegou ao Portão 2, não foi baixado nem publicado. Não houve nova tentativa.
 
-**Data da verificação:** 15/10/2026 (horário de São Paulo, UTC−03).
+**Data:** 15/10/2026 — horário de São Paulo (UTC−03).
 
 ## Pré-voo
 
-| Verificação | Resultado | Evidência |
-|---|---|---|
-| PR #4 — contrato REST do Gemini TTS | OK, mesclado | Merge commit `1056d42f615a28b5b5f2cb2771224e587f85f093`. |
-| PR #7 — batching/cache/quota | OK, mesclado | Merge commit/HEAD de `main`: `68e3b5303796ec9106faf4058763b12c4f1b1d26`. |
-| Produção Vercel em `main` | OK | Deployment `dpl_DfbcebMMjt24SnUk5SiLWwN2RKrq`, estado `READY`, alvo `production`, SHA idêntico ao HEAD de `main`; alias `https://estudio-canal-ia.vercel.app`. O deployment ficou pronto cerca de 60,4 s após o início do build. |
-| Migração Neon do PR #7 | OK | A migração foi aplicada e verificada anteriormente na branch principal. Nesta verificação, a tabela de uso respondeu à consulta e o cache não tinha entradas válidas. |
-| Contadores TTS antes da prova | OK — baseline zero | Janela diária `America/Los_Angeles`: 0 eventos, 0 chamadas API, 0 sucessos, 0 falhas, 0 cache hits; 0 entradas de cache válidas. |
-| Preview Vercel da PR #8 | AUTOMÁTICO / READY | A integração iniciou o deployment de preview `dpl_8xGi5uCq7NBk9ptrCMEvj854bJyR` (branch `fix/cachear-amostra-tts`, SHA `fc0a2685907cde0910aa1ee3e4f45c40f4b9e187`); concluiu em `READY`, com `target` diferente de production. [Abrir preview](https://estudio-canal-2oh8e49iz-jadiels-projects-3b6be146.vercel.app). |
+- PRs #4, #7 e #8 estavam mescladas. O deployment de produção estava `READY` no SHA `4324e3d2ef50606c839a7db273d7172a9e7451bb`, correspondente ao `main` após a PR #8.
+- A migration TTS do PR #7 já estava aplicada e verificada na branch principal do Neon.
+- O workflow de render usou esse SHA. Não houve deploy manual, alteração de segredo ou publicação no YouTube.
 
-## Etapas autorizadas
+## Amostras TTS e cache
 
-| Etapa | Estado | Resultado/evidência |
-|---|---|---|
-| 1. Pré-voo | **OK** | Produção está no HEAD de `main`; PRs #4 e #7 mesclados; migração acessível e contadores iniciais zerados. |
-| 2. Criar pauta, gerar roteiro e aprovar no Portão 1 | **NÃO EXECUTADA** | Nenhuma pauta ou roteiro de prova foi criado; Portão 1 não foi acionado. |
-| 3. Gerar a mesma amostra TTS duas vezes e testar cache | **BLOQUEADA / NÃO EXECUTADA** | A rota de produção `tts.test` chamava `generateSpeech`, que ignora o cache. Duas execuções não provariam um cache hit e poderiam gerar chamadas Gemini adicionais. A consulta posterior confirmou que nenhum evento TTS foi registrado durante esta prova: contadores permanecem em zero. |
-| 4. Captura simples | **NÃO EXECUTADA** | Opcional; nenhum item visual foi anexado. |
-| 5. Iniciar e acompanhar render real | **NÃO EXECUTADA** | Nenhum job de render desta prova foi criado; nenhuma execução nova de GitHub Actions foi disparada. Duração do job Actions: **N/A — workflow não iniciado**. Contagem de cues/blocos: **N/A — roteiro não criado**. |
-| 6. Aprovar no Portão 2 e baixar MP4 | **NÃO EXECUTADA** | Nenhum vídeo foi renderizado/aprovado; tamanho do MP4 e QA item a item: **N/A**. Nada foi publicado no YouTube. |
-| 7. Limpar draft Release | **NÃO APLICÁVEL** | Nenhum job nem draft Release foi criado; o workflow `render-cleanup.yml` não foi acionado. |
-| 8. Registrar diagnóstico | **OK** | Relatório registrado; PR #8 aberta sem merge. A integração Vercel iniciou apenas um preview automático, agora `READY`, não um deployment de produção. |
+Os eventos de `studio_tts_usage` foram verificados diretamente, sem consultar texto ou áudio:
 
-## Desvio encontrado e correção preparada
+1. **15:46:11.127:** `api_call`, `purpose=connection_test`, `outcome=success`, HTTP 200, modelo `gemini-3.8-flash-tts`. A primeira amostra chamou o Gemini.
+2. **15:48:21.782:** `cache_hit`, `purpose=connection_test`. A segunda amostra reutilizou o áudio; não houve nova chamada ao Gemini. O intervalo entre as amostras foi de 2 min 10 s, acima do limite de 1/min.
+3. **16:05:32.660:** uma chamada `api_call` de `purpose=render`, `outcome=success`, HTTP 200, para a narração do vídeo.
 
-A tela “Gerar amostra” usa a mutation `tts.test`. No código presente em produção, essa rota chamava `generateSpeech(...)`, não `generateSpeechCached(...)`. Além de contornar o cache persistente do Neon, a chamada era registrada com a finalidade padrão `render`, dificultando distinguir uma amostra de uma narração de render.
+A consulta de estimativa do manifesto registrou **9 cues e 1 bloco**. Depois da chamada de render, uma consulta somente de leitura indicou 1 bloco em cache e 0 chamadas novas estimadas. O job efetivamente realizou uma chamada Gemini para o render, registrada acima.
 
-A correção da [PR #8](https://github.com/jadiel054/estudio-canal-ia/pull/8) faz a rota usar `generateSpeechCached(...)` com finalidade `connection_test`, propaga essa finalidade para os eventos de API e `cache_hit`, e inclui regressões que verificam que a repetição da frase fixa reaproveita o WAV, não faz uma segunda chamada Gemini e grava corretamente `connection_test`. O limitador atual da amostra permanece ativo: permite uma tentativa por minuto; após a correção estar mesclada e implantada, a repetição de produção deverá respeitar esse intervalo.
+## Pauta, roteiro e Portão 1
 
-**Validação local da correção:** `pnpm check` OK; `pnpm test` — 21 arquivos e 106 testes OK; `python3 -m unittest scripts.test_render_video` — 17 testes OK; `pnpm build` OK. O build exibiu avisos preexistentes sobre `config.js` não modular e chunk JS acima de 500 kB; não falhou.
+Foi criada uma pauta Short identificada como teste: **“Teste de pipeline — IA e tokens: por que palavras podem virar partes”**. O roteiro foi gerado, revisado e submetido ao QA textual; a versão revisada foi aprovada no **Portão 1**. Uma captura simples foi anexada. Nenhum outro item editorial foi alterado.
 
-## Estado final observado
+## Render, callback e QA
 
-A aplicação de produção não foi aberta nem alterada durante a prova; não existe pauta, roteiro, job de render ou draft Release criado por esta execução. Não houve chamada real ao Gemini TTS, render, aprovação de Portão 1/2, download de MP4, publicação, execução de limpeza, merge ou deploy manual/de produção. A PR #8 acionou automaticamente o preview Vercel acima, concluído em `READY`; a produção continua no deployment de `main` descrito no pré-voo. As duas aprovações humanas e o restante da prova ficam pendentes até a correção ser mesclada e publicada pelo fluxo autorizado.
+Foi iniciado **um único job real**, sem retries:
 
-## Evidências que não existem porque a prova foi interrompida
+- Job: `eb74bf31-8df1-4311-9766-c601976d4119`.
+- [Execução GitHub Actions #38790905182](https://github.com/jadiel054/estudio-canal-ia/actions/runs/38790905182), no SHA de produção `4324e3d2ef50606c839a7db273d7172a9e7451bb`.
+- Duração total do run: **1 min 55 s** (16:04:36–16:06:31). O runner executou por 1 min 51 s.
+- Três callbacks de progresso `rendering` foram aceitos, entre 16:05:14.956 e 16:06:24.574. O último progresso registrado foi 88%.
 
-- 1ª versus 2ª amostra TTS / cache hit: não executadas; baseline e contadores seguem 0.
-- Número de cues/blocos: indisponível, pois o roteiro de prova não foi criado.
-- Duração do workflow de render: indisponível, pois não foi iniciado.
-- QA do MP4 e tamanho do arquivo: indisponíveis, pois nenhum MP4 foi produzido.
-- Captura do estado final dentro do app: não capturada; estado final descrito acima.
-- Logs do job desta prova: inexistentes; nenhum job foi enviado.
+O worker criou o draft Release privado `414172008` (`studio-render-eb74bf31-8df1-4311-9766-c601976d4119`) com dois assets. O MP4 tem **2.231.262 bytes**; o SRT, 1.066 bytes. Esses são metadados do Release, não uma aprovação de QA.
+
+O callback final `status=qa` foi recusado com HTTP 400 e código seguro `callback_operation_failed`. O callback secundário de falha também foi recusado. O job permanece no Neon como `rendering`, 88%, sem `finished_at`, `error_code`, `release_id`, `asset_id`, `file_size_bytes` ou QA persistido. A aba **Fila** não mostrou este job em “Aguardando vídeo”; mostrou somente um item simulado preexistente, que não foi alterado.
+
+Como o app não aceitou o callback, **nenhum dos cinco checks de QA pode ser afirmado como aprovado**:
+
+- `video_stream`: não confirmado no app;
+- `audio_stream`: não confirmado no app;
+- `captions`: não confirmado no app;
+- `duration`: não confirmado no app;
+- `file_size`: não confirmado pelo callback — existe apenas o tamanho do asset no Release, informado acima.
+
+Assim, o **Portão 2 permaneceu bloqueado**. Não aprovei o vídeo e não baixei o MP4.
+
+## Diagnóstico e correção
+
+A inspeção de leitura do schema de produção confirmou que `studio_render_jobs` não contém as colunas `http_status` e `upstream_status`, embora o caminho de callback `status=failed` execute um `UPDATE` que as utiliza. Esse descompasso explica por que o callback secundário não conseguiu persistir a falha e por que o job ficou preso em `rendering`.
+
+A causa específica do primeiro HTTP 400 no callback de QA **não pôde ser determinada**: a resposta e os logs seguros expõem apenas `callback_operation_failed`, sem a etapa interna que rejeitou o callback. Não atribuo a falha à quota TTS: a chamada Gemini do render terminou com sucesso HTTP 200.
+
+A correção de schema e seu teste estão na [PR #9](https://github.com/jadiel054/estudio-canal-ia/pull/9), aberta e sem merge. A migration está no PR e **não foi aplicada** no Neon. Os testes locais passaram: `pnpm check`; `pnpm test` (21 arquivos, 107 testes); `python3 -m unittest scripts.test_render_video` (17 testes); e `pnpm build`. O build mantém avisos preexistentes sobre `config.js` e tamanho de bundle.
+
+A integração criou automaticamente o preview Vercel [READY](https://estudio-canal-3bn08e9vq-jadiels-projects-3b6be146.vercel.app), separado de produção. O deployment de produção continua `READY` no SHA `4324e3d2ef50606c839a7db273d7172a9e7451bb`. Não fiz deploy manual nem merge.
+
+## Portão 2, download e limpeza
+
+O draft Release privado ainda contém o único MP4 produzido. **Não executei `render-cleanup.yml`**: a etapa autorizada previa limpeza depois da aprovação do Portão 2 e do download, e esses passos não ocorreram. Apagar agora removeria a única cópia antes de o proprietário decidir se deseja preservá-la para inspeção ou descartá-la.
+
+Estado final: Portão 1 aprovado; 1 render real criado; callback/QA rejeitado; Portão 2 não aprovado; MP4 não baixado; nenhuma publicação no YouTube; 0 retries; limpeza pendente da decisão do proprietário. Para retomar, primeiro revisar/mesclar a PR #9 e aplicar sua migration pelo fluxo autorizado; qualquer novo render fica fora desta prova e requer autorização própria.
