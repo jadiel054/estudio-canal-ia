@@ -4,9 +4,9 @@ import { toast } from "sonner";
 import {
   AlertTriangle, ArrowUpRight, AudioLines, BarChart3, Bot, CalendarClock, Check, CheckCircle2,
   ChevronRight, CircleDollarSign, ClipboardCheck, Clock3, Copy, Download, ExternalLink, FileCode2,
-  FilePenLine, Film, Flame, Gauge, Info, Lightbulb, Link2, ListFilter, LockKeyhole, MessageSquare,
+  CircleAlert, FilePenLine, Film, Flame, Gauge, Info, Lightbulb, Link2, ListFilter, Loader2, LockKeyhole, MessageSquare,
   Mic2, MoreHorizontal, Pencil, Play, Plus, RadioTower, RefreshCw, Rocket, Save, Search, Send,
-  Radar, Settings2, ShieldCheck, Sparkles, TimerReset, Trash2, UploadCloud, Video, WandSparkles, XCircle, Zap,
+  Radar, Settings2, ShieldCheck, Sparkles, TimerReset, Trash2, UploadCloud, Video, WandSparkles, Wifi, XCircle, Zap,
 } from "lucide-react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { type AgentAction, type Format, type Idea, stageMeta } from "@/data/studio";
@@ -342,7 +342,25 @@ function AgentPage() {
 
 function IntegrationsPage() {
   const { connections, requestPlatformConnection, adapters, selectAdapter } = useStudio();
+  const integration = trpc.studio.renderIntegration.useQuery(undefined, { retry: 1 });
+  const githubTest = trpc.studio.testGitHubActionsConnection.useMutation({
+    onSuccess: result => result.ok
+      ? toast.success("GitHub Actions conectado", { description: `API respondeu HTTP ${result.httpStatus} em ${result.latencyMs} ms.` })
+      : toast.error("Teste do GitHub Actions falhou", { description: result.httpStatus ? `${result.status} · HTTP ${result.httpStatus}` : "Token ausente ou falha de rede; veja o status exibido no cartão." }),
+    onError: error => toast.error("Teste do GitHub Actions indisponível", { description: error.message }),
+  });
+  const result = githubTest.data;
+  const connectionLabel = githubTest.isPending ? "Testando conexão…"
+    : result?.status === "ok" ? "Conectado"
+    : result?.status === "unauthorized" ? result.httpStatus === 401 ? "Token recusado · HTTP 401" : "Token GITHUB_ACTIONS_TOKEN ausente"
+      : result?.status === "forbidden" ? "Sem escopo/permissão · HTTP 403"
+        : result?.status === "not_found" ? "Repositório não encontrado ou sem acesso · HTTP 404"
+          : result?.status === "network_error" ? result.httpStatus ? `Falha da API · HTTP ${result.httpStatus}` : "Falha de rede/timeout · sem resposta HTTP"
+            : integration.data?.githubToken ? "Token configurado · teste pendente"
+              : integration.isLoading ? "Verificando configuração…" : integration.isError ? "Status da credencial indisponível" : "GITHUB_ACTIONS_TOKEN ausente";
+  const connectionTone = githubTest.isPending ? "text-[#ffd98b]" : result ? result.ok ? "text-[#c6ff4d]" : "text-[#ffaaa3]" : integration.data?.githubToken || integration.isLoading || integration.isError ? "text-[#ffd98b]" : "text-[#ffaaa3]";
   return <><PageHeader eyebrow="ADAPTADORES TROCVÉIS" title="Integrações e provedores" description="Conecte plataformas apenas no cofre. Troque provedores sem mudar o núcleo do estúdio e mantenha um fallback para cada etapa crítica." />
+    <Card className="mb-6 border-[#c6ff4d]/20"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><p className="label">GITHUB ACTIONS · TESTE REAL</p><div className="mt-2 flex items-center gap-2">{githubTest.isPending ? <Loader2 size={17} className={`animate-spin ${connectionTone}`} /> : result?.ok ? <CheckCircle2 size={17} className={connectionTone} /> : result ? <CircleAlert size={17} className={connectionTone} /> : <ShieldCheck size={17} className={connectionTone} />}<h2 className={`text-sm font-black ${connectionTone}`}>{connectionLabel}</h2></div><p className="mt-2 max-w-2xl text-xs leading-5 text-[#95a2b8]">Consulta somente GET /repos/jadiel054/estudio-canal-ia/releases?per_page=1. Não dispara workflow, cria release nem altera dados. {githubTest.isPending ? "Aguardando a resposta do GitHub…" : result ? `Último teste: ${result.latencyMs} ms${result.httpStatus ? ` · HTTP ${result.httpStatus}` : ""}.` : integration.data?.githubToken ? "A credencial existe, mas a conectividade ainda não foi confirmada." : "O status verde só aparece depois de uma resposta 2xx real do GitHub."}</p></div><Button variant="secondary" disabled={githubTest.isPending} onClick={() => githubTest.mutate()}>{githubTest.isPending ? <><Loader2 size={14} className="animate-spin" /> Testando conexão…</> : <><Wifi size={14} /> Testar conexão</>}</Button></div></Card>
     <div className="grid gap-4 xl:grid-cols-2">{connections.map(connection => <Card key={connection.platform}><div className="flex items-start justify-between gap-4"><div className="flex gap-3"><span className={`grid h-11 w-11 place-items-center rounded-xl ${connection.platform === "youtube" ? "bg-[#ff5353]/12 text-[#ff7b70]" : "bg-[#23d5b8]/12 text-[#5eefd4]"}`}><Play size={19} fill="currentColor" /></span><div><h2 className="font-black text-white">{connection.label}</h2><p className="mt-1 text-xs font-bold text-[#b1bdcf]">{connection.state}</p></div></div><span className="tag">{connection.enabled ? "Ativa" : "Protegida"}</span></div><p className="mt-4 text-sm leading-6 text-[#95a2b8]">{connection.detail}</p><div className="mt-4 flex gap-2"><Button onClick={() => requestPlatformConnection(connection.platform)}><Link2 size={14} /> Preparar conexão</Button><Button variant="secondary" onClick={() => toast.message("Escopos mínimos", { description: connection.platform === "youtube" ? "youtube.upload e youtube.readonly; revogáveis no painel." : "Escopos serão definidos quando a app TikTok for conectada." })}><Info size={14} /> Escopos</Button></div></Card>)}</div>
     <div className="mt-6"><p className="label">ADAPTADORES DE PRODUÇÃO</p><div className="mt-3 grid gap-3 xl:grid-cols-2">{adapters.map(adapter => <Card key={adapter.id} className="flex items-center gap-3"><span className={`grid h-9 w-9 place-items-center rounded-xl ${adapter.active ? "bg-[#c6ff4d] text-[#101421]" : "bg-white/[.06] text-[#8491a9]"}`}>{adapter.active ? <Check size={17} /> : <Zap size={16} />}</span><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><p className="text-xs font-black text-white">{adapter.capability}</p>{adapter.fallback && <span className="tag text-[#c5b7ff]">fallback</span>}</div><p className="truncate text-xs text-[#929fb6]">{adapter.provider} · {adapter.plan}</p></div><Button variant={adapter.active ? "ghost" : "secondary"} disabled={adapter.active} title={adapter.active ? "Já é o adaptador ativo" : undefined} onClick={() => selectAdapter(adapter.id)}>{adapter.active ? "Ativo" : "Usar"}</Button></Card>)}</div></div>
   </>;

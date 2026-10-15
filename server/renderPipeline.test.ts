@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { validateRenderCallback } from "./renderPipeline";
+import { testGitHubActionsConnection, validateRenderCallback } from "./renderPipeline";
 
 const jobId = "123e4567-e89b-42d3-a456-426614174000";
 const eventId = "123e4567-e89b-42d3-a456-426614174001";
@@ -71,5 +71,77 @@ describe("callback do render real", () => {
     expect(sql).toMatch(/ADD COLUMN IF NOT EXISTS upstream_status INTEGER/i);
     expect(sql).toMatch(/http_status IS NULL OR http_status BETWEEN 100 AND 599/i);
     expect(sql).toMatch(/upstream_status IS NULL OR upstream_status BETWEEN 100 AND 599/i);
+  });
+});
+
+describe("teste somente de leitura da conexão GitHub Actions", () => {
+  const token = "unit-test-github-token-never-return-this";
+  const endpoint = "https://api.github.com/repos/jadiel054/estudio-canal-ia/releases?per_page=1";
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function responseMock(status: number) {
+    const body = { json: vi.fn(), text: vi.fn() };
+    const response = { status, json: body.json, text: body.text } as unknown as Response;
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => response);
+    return { fetchMock, body };
+  }
+
+  it("confirma acesso real com GET de releases e não retorna credencial, headers ou corpo", async () => {
+    vi.stubEnv("GITHUB_ACTIONS_TOKEN", token);
+    const { fetchMock, body } = responseMock(200);
+    const result = await testGitHubActionsConnection(fetchMock as typeof fetch);
+    expect(result).toMatchObject({ ok: true, status: "ok", httpStatus: 200 });
+    expect(result.latencyMs).toBeGreaterThanOrEqual(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, request] = fetchMock.mock.calls[0];
+    expect(url).toBe(endpoint);
+    expect(request?.method).toBe("GET");
+    const headers = new Headers(request?.headers);
+    expect(headers.get("authorization")).toBe(`Bearer ${token}`);
+    expect(headers.get("accept")).toBe("application/vnd.github+json");
+    expect(request?.body).toBeUndefined();
+    expect(body.json).not.toHaveBeenCalled();
+    expect(body.text).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain(token);
+    expect(result).not.toHaveProperty("headers");
+    expect(result).not.toHaveProperty("body");
+  });
+
+  it.each([
+    [401, "unauthorized"],
+    [403, "forbidden"],
+    [404, "not_found"],
+    [503, "network_error"],
+  ] as const)("mapeia HTTP %i para %s sem ler corpo", async (httpStatus, status) => {
+    vi.stubEnv("GITHUB_ACTIONS_TOKEN", token);
+    const { fetchMock, body } = responseMock(httpStatus);
+    const result = await testGitHubActionsConnection(fetchMock as typeof fetch);
+    expect(result).toMatchObject({ ok: false, status, httpStatus });
+    expect(body.json).not.toHaveBeenCalled();
+    expect(body.text).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain(token);
+  });
+
+  it("converte falha de rede/timeout em network_error sem expor a exceção", async () => {
+    vi.stubEnv("GITHUB_ACTIONS_TOKEN", token);
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => { throw new Error(`network failure containing ${token}`); });
+    const result = await testGitHubActionsConnection(fetchMock as typeof fetch);
+    expect(result).toMatchObject({ ok: false, status: "network_error", httpStatus: null });
+    expect(JSON.stringify(result)).not.toContain(token);
+    expect(JSON.stringify(result)).not.toContain("network failure");
+  });
+
+  it("não chama a API e retorna somente estado allowlisted quando o PAT não está configurado", async () => {
+    vi.stubEnv("GITHUB_ACTIONS_TOKEN", "");
+    const fetchMock = vi.fn();
+    const result = await testGitHubActionsConnection(fetchMock as typeof fetch);
+    expect(result).toMatchObject({ ok: false, status: "unauthorized", httpStatus: null });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(Object.keys(result).sort()).toEqual(["httpStatus", "latencyMs", "ok", "status"]);
   });
 });

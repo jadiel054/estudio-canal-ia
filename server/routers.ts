@@ -13,7 +13,7 @@ import { parseStudioState, StateTooLargeError } from "./studioStateSchema";
 import { getRadarState, refreshRadar } from "./radar";
 import { generateScriptForIdea, reviewScriptForCurrentDraft } from "./scriptPipeline";
 import { generateSpeechCached, getTtsSettings, testTtsConnection, TTS_NARRATION_STYLE, ttsSettingsSchema, updateTtsSettings } from "./ttsProvider";
-import { estimateRenderTtsCalls, renderIntegrationStatus, requestRenderAssetCleanup, startRenderPipeline, uploadRenderInput } from "./renderPipeline";
+import { estimateRenderTtsCalls, renderIntegrationStatus, requestRenderAssetCleanup, startRenderPipeline, testGitHubActionsConnection, uploadRenderInput } from "./renderPipeline";
 import { getTtsUsageSummary } from "./ttsUsage";
 
 async function enforceLLMRateLimit(userId: string) { if (!(await consumeRateLimit(`llm:${userId}`, 20))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Limite de 20 chamadas LLM por minuto atingido. Tente novamente em instantes." }); }
@@ -80,6 +80,10 @@ export const appRouter = router({
     verifyPersistence: adminProcedure.mutation(() => verifyStudioDatabase()),
     state: adminProcedure.query(() => getStudioState()),
     renderIntegration: adminProcedure.query(() => renderIntegrationStatus()),
+    testGitHubActionsConnection: adminProcedure.mutation(async ({ ctx }) => {
+      if (!(await consumeRateLimit(`github-actions-connection:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "O teste do GitHub Actions pode ser executado uma vez por minuto." });
+      return testGitHubActionsConnection();
+    }),
     ttsUsage: adminProcedure.query(() => getTtsUsageSummary()),
     setRenderVoiceMode: adminProcedure.input(z.object({ voiceMode: z.enum(["TTS", "Música + texto"]) })).mutation(async ({ input }) => {
       const state = await getStudioState() as any;
