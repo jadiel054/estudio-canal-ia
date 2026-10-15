@@ -11,7 +11,7 @@ import { readSession } from "./auth";
 import { refreshRadar } from "./radar";
 import { RENDER_PATHS, verifyRenderRequestSignature } from "./renderSecurity";
 import { getRenderDownloadAsset, getSignedRenderInput, getSignedRenderManifest, processRenderCallback, synthesizeRenderChunk } from "./renderPipeline";
-import { classifyRenderFailure, isRenderOperation, type RenderErrorCode, type RenderOperation } from "./renderObservability";
+import { callbackStageDiagnostic, classifyRenderFailure, isRenderCallbackStageCode, isRenderOperation, renderFailureLogRecord, type RenderErrorCode, type RenderOperation } from "./renderObservability";
 
 function sendRenderFailure(res: Response, operation: RenderOperation, status: number, errorCode: RenderErrorCode, upstreamStatus?: number, detail?: ReturnType<typeof classifyRenderFailure>) {
   const safeDetail = {
@@ -22,8 +22,10 @@ function sendRenderFailure(res: Response, operation: RenderOperation, status: nu
     ...(detail?.retryAfterMs !== undefined ? { retryAfterMs: detail.retryAfterMs } : {}),
     ...(detail?.providerModel ? { providerModel: detail.providerModel } : {}),
   };
-  console.warn(JSON.stringify({ event: "falha_operacao_render", operation, errorCode, httpStatus: status, ...(upstreamStatus ? { upstreamStatus } : {}), ...safeDetail }));
+  const safeStageCode = isRenderCallbackStageCode(detail?.stageCode) ? detail.stageCode : undefined;
+  console.warn(JSON.stringify(renderFailureLogRecord({ ...(detail ?? {}), operation, errorCode, ...(upstreamStatus ? { upstreamStatus } : {}) }, status)));
   res.set("X-Render-Error-Code", errorCode);
+  if (safeStageCode) res.set("X-Render-Stage-Code", safeStageCode);
   if (upstreamStatus) res.set("X-Render-Upstream-Status", String(upstreamStatus));
   if (safeDetail.quotaScope) res.set("X-Render-Quota-Scope", safeDetail.quotaScope);
   if (safeDetail.quotaValue !== undefined) res.set("X-Render-Quota-Value", String(safeDetail.quotaValue));
@@ -31,7 +33,7 @@ function sendRenderFailure(res: Response, operation: RenderOperation, status: nu
   if (safeDetail.quotaId) res.set("X-Render-Quota-Id", safeDetail.quotaId);
   if (safeDetail.retryAfterMs !== undefined) res.set("X-Render-Retry-After-Ms", String(safeDetail.retryAfterMs));
   if (safeDetail.providerModel) res.set("X-Render-TTS-Model", safeDetail.providerModel);
-  return res.status(status).json({ error: errorCode, code: errorCode, ...(upstreamStatus ? { upstreamStatus } : {}), ...safeDetail });
+  return res.status(status).json({ error: errorCode, code: errorCode, ...(safeStageCode ? { stageCode: safeStageCode } : {}), ...(upstreamStatus ? { upstreamStatus } : {}), ...safeDetail });
 }
 
 /** Registers all application API routes without starting a network listener. */
@@ -101,8 +103,20 @@ export function registerApiRoutes(app: Express) {
     const signedPath = operation === "manifest" ? RENDER_PATHS.manifest : operation === "voice" ? RENDER_PATHS.voice : operation === "input" ? RENDER_PATHS.input : operation === "callback" ? RENDER_PATHS.callback : undefined;
     if (!signedPath) return sendRenderFailure(res, safeOperation, 404, "render_operation_not_found");
     const rawBody = (req as typeof req & { rawBody?: Buffer }).rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}), "utf8");
-    if (!verifyRenderRequestSignature(rawBody, req.get("x-render-signature"), process.env.STUDIO_RENDER_HMAC_SECRET, { method: "POST", path: signedPath })) return sendRenderFailure(res, safeOperation, 401, "render_unauthorized");
-    if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) return sendRenderFailure(res, safeOperation, 400, "invalid_json_body");
+    if (!verifyRenderRequestSignature(rawBody, req.get("x-render-signature"), process.env.STUDIO_RENDER_HMAC_SECRET, { method: "POST", path: signedPath })) {
+      if (operation === "callback") {
+        const diagnostic = callbackStageDiagnostic("assinatura");
+        return sendRenderFailure(res, safeOperation, 401, diagnostic.errorCode, undefined, diagnostic);
+      }
+      return sendRenderFailure(res, safeOperation, 401, "render_unauthorized");
+    }
+    if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+      if (operation === "callback") {
+        const diagnostic = callbackStageDiagnostic("validacao_payload");
+        return sendRenderFailure(res, safeOperation, 400, diagnostic.errorCode, undefined, diagnostic);
+      }
+      return sendRenderFailure(res, safeOperation, 400, "invalid_json_body");
+    }
     try {
       if (operation === "manifest") {
         if (typeof req.body.jobId !== "string" || !/^[0-9a-f-]{36}$/i.test(req.body.jobId)) return sendRenderFailure(res, safeOperation, 400, "invalid_job_id");

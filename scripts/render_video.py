@@ -39,7 +39,10 @@ SAFE_RENDER_ERROR_CODES = {
     "ffmpeg_failed",
     "invalid_response_signature", "invalid_tts_wav", "invalid_tts_duration", "manifest_invalid",
     "callback_not_confirmed", "github_api_failed", "github_upload_failed", "render_http_error",
+    "callback_signature_invalid", "callback_payload_invalid", "callback_idempotency_failed",
+    "callback_job_state_rejected", "callback_release_verification_failed", "callback_database_update_failed",
 }
+SAFE_CALLBACK_STAGE_CODES = {"assinatura", "validacao_payload", "idempotencia", "estado_job", "verificacao_release", "update_banco"}
 
 def operation_from_path(path: str) -> str:
     operation = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("op", ["unknown"])[0]
@@ -48,6 +51,10 @@ def operation_from_path(path: str) -> str:
 def safe_error_code(headers) -> str:
     candidate = headers.get("X-Render-Error-Code") if headers else None
     return candidate if candidate in SAFE_RENDER_ERROR_CODES else "render_http_error"
+
+def safe_callback_stage_code(headers) -> str | None:
+    candidate = headers.get("X-Render-Stage-Code") if headers else None
+    return candidate if candidate in SAFE_CALLBACK_STAGE_CODES else None
 
 def safe_http_status(value) -> int | None:
     try:
@@ -76,7 +83,7 @@ def safe_retry_after(value) -> int | None:
     return number if 0 <= number <= 604_800_000 else None
 
 class RenderError(RuntimeError):
-    def __init__(self, message: str, *, operation: str = "worker", error_code: str = "render_failed", http_status: int | None = None, upstream_status: int | None = None, quota_scope: str | None = None, quota_value: float | None = None, quota_metric: str | None = None, quota_id: str | None = None, retry_after_ms: int | None = None, provider_model: str | None = None):
+    def __init__(self, message: str, *, operation: str = "worker", error_code: str = "render_failed", http_status: int | None = None, upstream_status: int | None = None, quota_scope: str | None = None, quota_value: float | None = None, quota_metric: str | None = None, quota_id: str | None = None, retry_after_ms: int | None = None, provider_model: str | None = None, stage_code: str | None = None):
         super().__init__(message)
         self.operation = operation if operation in RENDER_OPERATIONS else "worker"
         self.error_code = error_code if error_code in SAFE_RENDER_ERROR_CODES else "render_failed"
@@ -88,6 +95,7 @@ class RenderError(RuntimeError):
         self.quota_id = safe_quota_identifier(quota_id)
         self.retry_after_ms = safe_retry_after(retry_after_ms)
         self.provider_model = provider_model if provider_model in SAFE_TTS_MODELS else None
+        self.stage_code = stage_code if stage_code in SAFE_CALLBACK_STAGE_CODES else None
 
 def compact_json(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -141,7 +149,8 @@ def post_studio(path: str, body: bytes, *, response_type: str = "json", verify_s
             quota_metric=safe_quota_identifier(headers.get("X-Render-Quota-Metric") if headers else None),
             quota_id=safe_quota_identifier(headers.get("X-Render-Quota-Id") if headers else None),
             retry_after_ms=safe_retry_after(headers.get("X-Render-Retry-After-Ms") if headers else None),
-            provider_model=headers.get("X-Render-TTS-Model") if headers else None) from None
+            provider_model=headers.get("X-Render-TTS-Model") if headers else None,
+            stage_code=safe_callback_stage_code(headers)) from None
     except (urllib.error.URLError, TimeoutError):
         raise RenderError("Falha de rede ao conectar ao endpoint interno do Estúdio.", operation=operation, error_code="render_network_error") from None
 
@@ -624,5 +633,7 @@ if __name__ == "__main__":
             record["httpStatus"] = diagnostic.http_status
         if diagnostic.upstream_status is not None:
             record["upstreamStatus"] = diagnostic.upstream_status
+        if diagnostic.stage_code is not None:
+            record["stageCode"] = diagnostic.stage_code
         print(json.dumps(record, separators=(",", ":")), file=sys.stderr)
         sys.exit(1)

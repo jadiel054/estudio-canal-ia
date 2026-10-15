@@ -5,7 +5,7 @@ import { buildNarrationChunks, extractScriptVisuals } from "./renderManifest";
 import { getStudioPool, getStudioState, stateVersion } from "./studioRepository";
 import { generateSpeechCached, getTtsSettings, MAX_TTS_ATTEMPTS_PER_MODEL, TTS_NARRATION_STYLE } from "./ttsProvider";
 import { getCachedTtsKeys, ttsAudioCacheKey } from "./ttsCache";
-import { isRenderErrorCode, isRenderOperation, renderFailureSummary, type RenderErrorCode, type RenderOperation } from "./renderObservability";
+import { isRenderErrorCode, isRenderOperation, renderFailureSummary, RenderCallbackStageError, type RenderCallbackStageCode, type RenderErrorCode, type RenderOperation } from "./renderObservability";
 
 const OWNER = "jadiel054";
 const REPOSITORY = "estudio-canal-ia";
@@ -198,6 +198,11 @@ export type RenderCallback = {
   providerModel?: "gemini-3.8-flash-tts" | "gemini-3.8-flash-lite-tts";
 };
 
+export type RenderCallbackDependencies = {
+  pool?: NonNullable<ReturnType<typeof getStudioPool>>;
+  verifyRelease?: (callback: RenderCallback) => Promise<void>;
+};
+
 export function validateRenderCallback(input: unknown): RenderCallback {
   if (!input || typeof input !== "object") throw new Error("Callback de render inválido.");
   const value = input as Record<string, unknown>;
@@ -263,22 +268,44 @@ async function verifyOutputRelease(callback: RenderCallback) {
   if (!asset || asset.state !== "uploaded" || asset.name !== callback.fileName || asset.size !== callback.fileSizeBytes || !["video/mp4", "application/octet-stream"].includes(asset.content_type)) throw new Error("O asset do GitHub não corresponde ao MP4 e ao tamanho declarados no QA.");
 }
 
-export async function processRenderCallback(rawInput: unknown) {
-  const callback = validateRenderCallback(rawInput); if (callback.status === "qa") await verifyOutputRelease(callback);
-  const connection = await requirePool().connect();
+export async function processRenderCallback(rawInput: unknown, dependencies: RenderCallbackDependencies = {}) {
+  let callback: RenderCallback;
+  try { callback = validateRenderCallback(rawInput); }
+  catch { throw new RenderCallbackStageError("validacao_payload"); }
+  if (callback.status === "qa") {
+    try { await (dependencies.verifyRelease ?? verifyOutputRelease)(callback); }
+    catch { throw new RenderCallbackStageError("verificacao_release"); }
+  }
+
+  let connection: any;
+  let stageCode: RenderCallbackStageCode = "estado_job";
   try {
+    connection = await (dependencies.pool ?? requirePool()).connect();
     await connection.query("BEGIN");
-    const jobResult = await connection.query<{ id: string; video_id: string; idea_id: string; script_id: string; script_version: number; status: string; workflow_run_id: string | null }>("SELECT id, video_id, idea_id, script_id, script_version, status, workflow_run_id::text FROM studio_render_jobs WHERE id = $1::uuid FOR UPDATE", [callback.jobId]);
-    const job = jobResult.rows[0]; if (!job) throw new Error("Job de render não encontrado.");
-    if (job.workflow_run_id && Number(job.workflow_run_id) !== callback.workflowRunId) throw new Error("Callback pertence a outra execução do workflow.");
+    const jobResult = await connection.query("SELECT id, video_id, idea_id, script_id, script_version, status, workflow_run_id::text FROM studio_render_jobs WHERE id = $1::uuid FOR UPDATE", [callback.jobId]) as { rows: Array<{ id: string; video_id: string; idea_id: string; script_id: string; script_version: number; status: string; workflow_run_id: string | null }> };
+    const job = jobResult.rows[0];
+    if (!job || (job.workflow_run_id && Number(job.workflow_run_id) !== callback.workflowRunId)) throw new RenderCallbackStageError("estado_job");
+
+    stageCode = "idempotencia";
     const eventInsert = await connection.query("INSERT INTO studio_render_callback_events (event_id, job_id, status) VALUES ($1::uuid, $2::uuid, $3) ON CONFLICT (event_id) DO NOTHING", [callback.eventId, callback.jobId, callback.status]);
-    if (eventInsert.rowCount === 0) { await connection.query("COMMIT"); return { duplicate: true, jobId: callback.jobId }; }
-    if (![...JOB_ACTIVE, "failed"].includes(job.status as any)) throw new Error("O job já terminou e não aceita novos eventos.");
-    const stateResult = await connection.query<{ value: any }>("SELECT value FROM app_settings WHERE key = 'studio_state' FOR UPDATE");
-    const state = stateResult.rows[0]?.value; if (!state) throw new Error("Estado do estúdio não encontrado no Neon.");
+    if (eventInsert.rowCount === 0) {
+      const existingResult = await connection.query("SELECT job_id::text, status FROM studio_render_callback_events WHERE event_id = $1::uuid FOR UPDATE", [callback.eventId]) as { rows: Array<{ job_id: string; status: string }> };
+      const existing = existingResult.rows[0];
+      if (!existing || existing.job_id !== callback.jobId || existing.status !== callback.status) throw new RenderCallbackStageError("idempotencia");
+      await connection.query("COMMIT");
+      console.info(JSON.stringify({ event: "callback_duplicado_ignorado", operation: "callback", stageCode: "idempotencia" }));
+      return { duplicate: true, jobId: callback.jobId };
+    }
+
+    stageCode = "estado_job";
+    if (![...JOB_ACTIVE, "failed"].includes(job.status as any)) throw new RenderCallbackStageError("estado_job");
+    const stateResult = await connection.query("SELECT value FROM app_settings WHERE key = 'studio_state' FOR UPDATE") as { rows: Array<{ value: any }> };
+    const state = stateResult.rows[0]?.value;
+    if (!state) throw new RenderCallbackStageError("estado_job");
     const video = state.videos?.find((item: any) => item.id === job.video_id); const idea = state.ideas?.find((item: any) => item.id === job.idea_id && !item.example); const script = state.scripts?.find((item: any) => item.id === job.script_id && !item.example); const storedJob = state.renderJobs?.find((item: any) => item.id === callback.jobId);
-    if (!video || !idea || !script || !storedJob) throw new Error("O estado editorial não corresponde ao job.");
-    if (script.status !== "Aprovado" || script.version !== job.script_version) throw new Error("O Portão 1 ou a versão do roteiro mudou durante o render.");
+    if (!video || !idea || !script || !storedJob || script.status !== "Aprovado" || script.version !== job.script_version) throw new RenderCallbackStageError("estado_job");
+
+    stageCode = "update_banco";
     if (callback.status === "qa") await connection.query("INSERT INTO studio_render_assets (id, script_id, script_version, github_release_id, github_asset_id, file_name, content_type, file_size_bytes, label, license) VALUES ($1::uuid, $2, $3, $4, $5, $6, 'video/mp4', $7, $8, $9) ON CONFLICT (github_asset_id) DO NOTHING", [randomUUID(), job.script_id, job.script_version, callback.releaseId, callback.assetId, callback.fileName, callback.fileSizeBytes, `MP4 de render ${callback.jobId}`, "Asset temporário interno; verifique termos de voz e fontes antes de publicar"]);
     const now = new Date().toISOString(); let finalStatus: "rendering" | "succeeded" | "failed" = callback.status === "failed" ? "failed" : "rendering"; let failedReason = callback.message;
     if (callback.status === "qa") {
@@ -299,18 +326,21 @@ export async function processRenderCallback(rawInput: unknown) {
       finalStatus = "failed"; failedReason = renderFailureSummary({ operation: callback.errorOperation, errorCode: callback.errorCode, httpStatus: callback.httpStatus, upstreamStatus: callback.upstreamStatus, quotaScope: callback.quotaScope, quotaValue: callback.quotaValue, quotaMetric: callback.quotaMetric, quotaId: callback.quotaId, retryAfterMs: callback.retryAfterMs, providerModel: callback.providerModel }); video.stage = "erro"; idea.status = "erro"; storedJob.status = "failed"; storedJob.error = failedReason; storedJob.errorCode = callback.errorCode ?? "render_failed"; storedJob.errorOperation = callback.errorOperation ?? "worker"; storedJob.httpStatus = callback.httpStatus; storedJob.upstreamStatus = callback.upstreamStatus; storedJob.quotaScope = callback.quotaScope; storedJob.quotaValue = callback.quotaValue; storedJob.quotaMetric = callback.quotaMetric; storedJob.quotaId = callback.quotaId; storedJob.retryAfterMs = callback.retryAfterMs; storedJob.providerModel = callback.providerModel; storedJob.finishedAt = now; storedJob.progress = callback.progress; storedJob.workflowRunId = callback.workflowRunId;
       await connection.query("UPDATE studio_render_jobs SET status = 'failed', progress = $2, workflow_run_id = $3, error_code = $4, error_message = $5, http_status = $6, upstream_status = $7, quota_scope = $8, quota_value = $9, quota_metric = $10, quota_id = $11, retry_after_ms = $12, provider_model = $13, finished_at = NOW(), updated_at = NOW() WHERE id = $1::uuid", [callback.jobId, callback.progress, callback.workflowRunId, storedJob.errorCode, failedReason, callback.httpStatus ?? null, callback.upstreamStatus ?? null, callback.quotaScope ?? null, callback.quotaValue ?? null, callback.quotaMetric ?? null, callback.quotaId ?? null, callback.retryAfterMs ?? null, callback.providerModel ?? null]);
     } else {
-      if (job.status === "failed") throw new Error("Job falhado não pode voltar a executar sem uma nova tentativa aprovada.");
+      if (job.status === "failed") throw new RenderCallbackStageError("estado_job");
       finalStatus = "rendering"; video.stage = "render"; storedJob.status = "rendering"; storedJob.progress = callback.progress; storedJob.workflowRunId = callback.workflowRunId;
       await connection.query("UPDATE studio_render_jobs SET status = 'rendering', progress = $2, workflow_run_id = $3, started_at = COALESCE(started_at, NOW()), updated_at = NOW() WHERE id = $1::uuid", [callback.jobId, callback.progress, callback.workflowRunId]);
     }
     state.audit = [{ id: randomUUID(), actor: "Sistema", action: `Render ${finalStatus}`, target: idea.title, at: now, detail: callback.status === "qa" && finalStatus === "succeeded" ? "MP4 validado no GitHub; QA concluído; aguardando Portão 2 humano." : failedReason?.slice(0, 300) ?? `Progresso ${callback.progress}%` }, ...(state.audit ?? [])].slice(0, 500);
     const oldVersion = stateVersion(state); state.version = oldVersion + 1;
     const saved = await connection.query("UPDATE app_settings SET value = $1::jsonb, updated_at = NOW() WHERE key = 'studio_state' AND COALESCE((value->>'version')::int, 0) = $2", [JSON.stringify(state), oldVersion]);
-    if (saved.rowCount !== 1) throw new Error("Conflito de versão ao atualizar o status do render.");
+    if (saved.rowCount !== 1) throw new Error("version_conflict");
     await connection.query("INSERT INTO audit_log (actor, action, target, details) VALUES ('Sistema', $1, $2, $3::jsonb)", [`Render ${finalStatus}`, idea.title, JSON.stringify({ jobId: callback.jobId, workflowRunId: callback.workflowRunId, progress: callback.progress, ...(finalStatus === "failed" ? { operation: storedJob.errorOperation ?? "worker", errorCode: storedJob.errorCode ?? "render_failed", httpStatus: storedJob.httpStatus, upstreamStatus: storedJob.upstreamStatus, quotaScope: storedJob.quotaScope, quotaValue: storedJob.quotaValue, quotaMetric: storedJob.quotaMetric, quotaId: storedJob.quotaId, retryAfterMs: storedJob.retryAfterMs, providerModel: storedJob.providerModel } : {}) })]);
     await connection.query("COMMIT"); return { duplicate: false, jobId: callback.jobId, status: finalStatus, progress: callback.progress };
-  } catch (error) { await connection.query("ROLLBACK"); throw error; }
-  finally { connection.release(); }
+  } catch (error) {
+    if (connection) { try { await connection.query("ROLLBACK"); } catch { /* erro de rollback não deve expor conteúdo */ } }
+    if (error instanceof RenderCallbackStageError) throw error;
+    throw new RenderCallbackStageError(stageCode);
+  } finally { connection?.release(); }
 }
 
 function formatDuration(seconds: number) { const total = Math.floor(seconds); const h = Math.floor(total / 3600); const m = Math.floor((total % 3600) / 60); const s = total % 60; return h ? `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`; }

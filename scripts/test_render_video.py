@@ -114,6 +114,7 @@ class RenderWorkerTests(unittest.TestCase):
     def test_http_error_keeps_only_operation_code_and_status(self):
         headers = Message()
         headers["X-Render-Error-Code"] = "tts_timeout"
+        headers["X-Render-Stage-Code"] = "verificacao_release"
         headers["X-Render-Upstream-Status"] = "429"
         headers["X-Render-Quota-Scope"] = "rpd"
         headers["X-Render-Quota-Value"] = "25"
@@ -130,10 +131,19 @@ class RenderWorkerTests(unittest.TestCase):
                 worker.post_studio("/api/render?op=voice", b"{}")
         error = caught.exception
         self.assertEqual((error.operation, error.error_code, error.http_status, error.upstream_status), ("voice", "tts_timeout", 400, 429))
+        self.assertEqual(error.stage_code, "verificacao_release")
         self.assertEqual((error.quota_scope, error.quota_value, error.retry_after_ms, error.provider_model), ("rpd", 25.0, 86_400_000, "gemini-3.8-flash-tts"))
         self.assertNotIn("roteiro confidencial", str(error))
         self.assertNotIn("chave privada", str(error))
         self.assertEqual(response_error.fp.tell(), 0, "O body da resposta não deve ser lido pelo worker")
+
+    def test_stage_code_allowlist_rejects_free_text(self):
+        headers = Message()
+        headers["X-Render-Stage-Code"] = "update_banco"
+        self.assertEqual(worker.safe_callback_stage_code(headers), "update_banco")
+        malicious_headers = Message()
+        malicious_headers["X-Render-Stage-Code"] = "roteiro privado e segredo"
+        self.assertIsNone(worker.safe_callback_stage_code(malicious_headers))
 
     def test_failed_callback_sends_only_safe_diagnostic_fields(self):
         old_run_id = worker.RUN_ID
