@@ -39,13 +39,13 @@ export async function recordTtsApiCall(event: TtsApiUsageEvent): Promise<boolean
   }
 }
 
-export async function recordTtsCacheHit(model: TtsApiUsageEvent["model"]): Promise<void> {
+export async function recordTtsCacheHit(model: TtsApiUsageEvent["model"], purpose: TtsPurpose = "render"): Promise<void> {
   const pool = getStudioPool();
   if (!pool) return;
   try {
     await pool.query(
-      "INSERT INTO studio_tts_usage (id, event_type, model, purpose, outcome) VALUES ($1::uuid, 'cache_hit', $2, 'render', NULL)",
-      [randomUUID(), model],
+      "INSERT INTO studio_tts_usage (id, event_type, model, purpose, outcome) VALUES ($1::uuid, 'cache_hit', $2, $3, NULL)",
+      [randomUUID(), model, purpose],
     );
   } catch {
     warnUnavailable();

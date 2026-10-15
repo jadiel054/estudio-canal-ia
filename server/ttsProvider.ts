@@ -414,6 +414,7 @@ export async function generateSpeechCached(
   text: string,
   settings: TtsSettings = DEFAULT_TTS_SETTINGS,
   style = TTS_NARRATION_STYLE,
+  purpose: TtsPurpose = "render",
 ): Promise<SpeechResult> {
   const clean = text.trim();
   if (!clean || clean.length > MAX_TEXT_CHARS) throw new TtsProviderError(`O trecho de narração deve ter entre 1 e ${MAX_TEXT_CHARS} caracteres.`);
@@ -422,10 +423,10 @@ export async function generateSpeechCached(
   const models = [validated.data.primaryModel, validated.data.fallbackModel] as const;
   for (const [index, model] of models.entries()) {
     const cacheKey = ttsAudioCacheKey({ text: clean, model, voice: validated.data.voice, style });
-    const cached = await getCachedTtsAudio(cacheKey, model);
+    const cached = await getCachedTtsAudio(cacheKey, model, purpose);
     if (cached) return { audio: cached, contentType: "audio/wav", model, voice: validated.data.voice, fallback: index === 1, cached: true };
   }
-  const generated = await generateAcrossModels(clean, validated.data, style, "render");
+  const generated = await generateAcrossModels(clean, validated.data, style, purpose);
   const cacheKey = ttsAudioCacheKey({ text: clean, model: generated.model, voice: generated.voice, style });
   await saveCachedTtsAudio({ cacheKey, model: generated.model, voice: generated.voice, audio: generated.audio });
   return generated;

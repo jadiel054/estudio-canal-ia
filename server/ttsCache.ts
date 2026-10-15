@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { getStudioPool } from "./studioRepository";
-import { recordTtsCacheHit } from "./ttsUsage";
+import { recordTtsCacheHit, type TtsPurpose } from "./ttsUsage";
 
 export const TTS_CACHE_TTL_DAYS = 7;
 export type TtsCacheModel = "gemini-3.8-flash-tts" | "gemini-3.8-flash-lite-tts";
@@ -17,7 +17,7 @@ export function ttsAudioCacheKey(value: { text: string; model: TtsCacheModel; vo
   return createHash("sha256").update(stable, "utf8").digest("hex");
 }
 
-export async function getCachedTtsAudio(cacheKey: string, model: TtsCacheModel): Promise<Buffer | undefined> {
+export async function getCachedTtsAudio(cacheKey: string, model: TtsCacheModel, purpose: TtsPurpose = "render"): Promise<Buffer | undefined> {
   const pool = getStudioPool();
   if (!pool) return undefined;
   try {
@@ -28,7 +28,7 @@ export async function getCachedTtsAudio(cacheKey: string, model: TtsCacheModel):
     );
     const audio = result.rows[0]?.audio_wav;
     if (!audio) return undefined;
-    await recordTtsCacheHit(model);
+    await recordTtsCacheHit(model, purpose);
     return Buffer.from(audio);
   } catch {
     warnUnavailable();

@@ -12,7 +12,7 @@ import { executeEditorialCommand, type EditorialCommand } from "./editorial";
 import { parseStudioState, StateTooLargeError } from "./studioStateSchema";
 import { getRadarState, refreshRadar } from "./radar";
 import { generateScriptForIdea, reviewScriptForCurrentDraft } from "./scriptPipeline";
-import { generateSpeech, getTtsSettings, testTtsConnection, ttsSettingsSchema, updateTtsSettings } from "./ttsProvider";
+import { generateSpeechCached, getTtsSettings, testTtsConnection, TTS_NARRATION_STYLE, ttsSettingsSchema, updateTtsSettings } from "./ttsProvider";
 import { estimateRenderTtsCalls, renderIntegrationStatus, requestRenderAssetCleanup, startRenderPipeline, uploadRenderInput } from "./renderPipeline";
 import { getTtsUsageSummary } from "./ttsUsage";
 
@@ -186,7 +186,7 @@ export const appRouter = router({
     test: adminProcedure.mutation(async ({ ctx }) => {
       if (!(await consumeRateLimit(`tts-test:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "A amostra de voz pode ser gerada uma vez por minuto." });
       const settings = await getTtsSettings();
-      const result = await generateSpeech("Olá! Este é um teste de voz em português brasileiro para o Estúdio de Canal IA.", settings);
+      const result = await generateSpeechCached("Olá! Este é um teste de voz em português brasileiro para o Estúdio de Canal IA.", settings, TTS_NARRATION_STYLE, "connection_test");
       return { audioBase64: result.audio.toString("base64"), contentType: result.contentType, model: result.model, voice: result.voice, fallback: result.fallback, bytes: result.audio.length };
     }),
   }),
