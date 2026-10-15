@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractScriptVisuals, formatSrtTimestamp } from "./renderManifest";
+import { buildNarrationChunks, extractScriptVisuals, formatSrtTimestamp } from "./renderManifest";
 
 describe("render manifest script extraction", () => {
   it("separates headings, captions and code without rewriting spoken text", () => {
@@ -10,7 +10,7 @@ describe("render manifest script extraction", () => {
   });
 
   it("rejects code-only scripts and scripts with too many cues instead of speaking code or truncating", () => {
-    expect(() => extractScriptVisuals("```ts\nconst secret = 1;\n```" )).toThrow("não contém texto de narração");
+    expect(() => extractScriptVisuals("\`\`\`ts\nconst secret = 1;\n\`\`\`" )).toThrow("não contém texto de narração");
     const many = Array.from({ length: 81 }, (_, index) => `Frase número ${index + 1}.`).join(" ");
     expect(() => extractScriptVisuals(many)).toThrow("excede o limite seguro");
   });
@@ -24,6 +24,24 @@ describe("render manifest script extraction", () => {
     expect(result.cues.length).toBeGreaterThan(1);
     expect(result.cues.every(cue => cue.text.length <= 180)).toBe(true);
     expect(() => extractScriptVisuals(`${"x".repeat(181)}.`)).toThrow("maior que o limite legível");
+  });
+});
+
+describe("TTS chunk planning", () => {
+  it("groups many caption cues into roughly 800–1,200 character calls without losing caption mappings", () => {
+    const cues = Array.from({ length: 20 }, (_, index) => ({ index, section: index < 10 ? "A" : "B", text: `Frase técnica número ${index + 1} sobre uma integração que vamos validar com cuidado.` }));
+    const chunks = buildNarrationChunks(cues);
+    expect(chunks.length).toBeLessThan(cues.length);
+    expect(chunks.map(chunk => chunk.cueIndices).flat()).toEqual(cues.map(cue => cue.index));
+    expect(chunks.every(chunk => chunk.text.length <= 1_100)).toBe(true);
+    expect(chunks.every(chunk => chunk.cueIndices.length > 1)).toBe(true);
+  });
+
+  it("keeps a cue whole and rejects invalid chunk settings", () => {
+    const cues = [{ index: 0, section: "Gancho", text: "Uma fala curta." }];
+    expect(buildNarrationChunks(cues)).toEqual([{ index: 0, cueIndices: [0], text: "Uma fala curta." }]);
+    expect(() => buildNarrationChunks(cues, 100)).toThrow("Limite de bloco TTS inválido");
+    expect(() => buildNarrationChunks([])).toThrow("Quantidade de cues fora dos limites");
   });
 });
 

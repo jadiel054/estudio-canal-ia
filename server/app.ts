@@ -10,14 +10,28 @@ import { pipeline } from "node:stream/promises";
 import { readSession } from "./auth";
 import { refreshRadar } from "./radar";
 import { RENDER_PATHS, verifyRenderRequestSignature } from "./renderSecurity";
-import { getRenderDownloadAsset, getSignedRenderInput, getSignedRenderManifest, processRenderCallback, synthesizeRenderCue } from "./renderPipeline";
+import { getRenderDownloadAsset, getSignedRenderInput, getSignedRenderManifest, processRenderCallback, synthesizeRenderChunk } from "./renderPipeline";
 import { classifyRenderFailure, isRenderOperation, type RenderErrorCode, type RenderOperation } from "./renderObservability";
 
-function sendRenderFailure(res: Response, operation: RenderOperation, status: number, errorCode: RenderErrorCode, upstreamStatus?: number) {
-  console.warn(JSON.stringify({ event: "render_operation_failed", operation, errorCode, httpStatus: status, ...(upstreamStatus ? { upstreamStatus } : {}) }));
+function sendRenderFailure(res: Response, operation: RenderOperation, status: number, errorCode: RenderErrorCode, upstreamStatus?: number, detail?: ReturnType<typeof classifyRenderFailure>) {
+  const safeDetail = {
+    ...(detail?.quotaScope ? { quotaScope: detail.quotaScope } : {}),
+    ...(detail?.quotaValue !== undefined ? { quotaValue: detail.quotaValue } : {}),
+    ...(detail?.quotaMetric ? { quotaMetric: detail.quotaMetric } : {}),
+    ...(detail?.quotaId ? { quotaId: detail.quotaId } : {}),
+    ...(detail?.retryAfterMs !== undefined ? { retryAfterMs: detail.retryAfterMs } : {}),
+    ...(detail?.providerModel ? { providerModel: detail.providerModel } : {}),
+  };
+  console.warn(JSON.stringify({ event: "falha_operacao_render", operation, errorCode, httpStatus: status, ...(upstreamStatus ? { upstreamStatus } : {}), ...safeDetail }));
   res.set("X-Render-Error-Code", errorCode);
   if (upstreamStatus) res.set("X-Render-Upstream-Status", String(upstreamStatus));
-  return res.status(status).json({ error: errorCode, code: errorCode, ...(upstreamStatus ? { upstreamStatus } : {}) });
+  if (safeDetail.quotaScope) res.set("X-Render-Quota-Scope", safeDetail.quotaScope);
+  if (safeDetail.quotaValue !== undefined) res.set("X-Render-Quota-Value", String(safeDetail.quotaValue));
+  if (safeDetail.quotaMetric) res.set("X-Render-Quota-Metric", safeDetail.quotaMetric);
+  if (safeDetail.quotaId) res.set("X-Render-Quota-Id", safeDetail.quotaId);
+  if (safeDetail.retryAfterMs !== undefined) res.set("X-Render-Retry-After-Ms", String(safeDetail.retryAfterMs));
+  if (safeDetail.providerModel) res.set("X-Render-TTS-Model", safeDetail.providerModel);
+  return res.status(status).json({ error: errorCode, code: errorCode, ...(upstreamStatus ? { upstreamStatus } : {}), ...safeDetail });
 }
 
 /** Registers all application API routes without starting a network listener. */
@@ -41,8 +55,8 @@ export function registerApiRoutes(app: Express) {
     let database: Awaited<ReturnType<typeof verifyStudioDatabase>>;
     try {
       database = await verifyStudioDatabase();
-    } catch (error) {
-      console.warn("[Estúdio] Health: verificação do Neon falhou:", error instanceof Error ? error.message : error);
+    } catch {
+      console.warn(JSON.stringify({ event: "falha_verificacao_neon", operation: "health", errorCode: "database_unavailable" }));
       database = { reachable: false, ...studioPersistenceStatus() };
     }
 
@@ -97,9 +111,9 @@ export function registerApiRoutes(app: Express) {
         return;
       }
       if (operation === "voice") {
-        if (typeof req.body.jobId !== "string" || !/^[0-9a-f-]{36}$/i.test(req.body.jobId) || !Number.isInteger(req.body.cueIndex)) return sendRenderFailure(res, safeOperation, 400, "invalid_voice_request");
-        const result = await synthesizeRenderCue(req.body.jobId, req.body.cueIndex);
-        res.set("X-Render-Response-Signature", result.signature).set("X-Render-Model", result.model).set("X-Render-Voice", result.voice).set("X-Render-Fallback", String(result.fallback)).type("audio/wav").send(result.audio);
+        if (typeof req.body.jobId !== "string" || !/^[0-9a-f-]{36}$/i.test(req.body.jobId) || !Number.isInteger(req.body.chunkIndex)) return sendRenderFailure(res, safeOperation, 400, "invalid_voice_request");
+        const result = await synthesizeRenderChunk(req.body.jobId, req.body.chunkIndex);
+        res.set("X-Render-Response-Signature", result.signature).set("X-Render-Model", result.model).set("X-Render-Voice", result.voice).set("X-Render-Fallback", String(result.fallback)).set("X-Render-Cache", String(result.cached)).type("audio/wav").send(result.audio);
         return;
       }
       if (operation === "input") {
@@ -112,7 +126,7 @@ export function registerApiRoutes(app: Express) {
       return res.json({ ok: true, ...result });
     } catch (error) {
       const diagnostic = classifyRenderFailure(safeOperation, error);
-      return sendRenderFailure(res, safeOperation, 400, diagnostic.errorCode, diagnostic.upstreamStatus);
+      return sendRenderFailure(res, safeOperation, 400, diagnostic.errorCode, diagnostic.upstreamStatus, diagnostic);
     }
   });
 

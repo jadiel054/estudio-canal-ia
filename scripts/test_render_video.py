@@ -43,10 +43,84 @@ class RenderWorkerTests(unittest.TestCase):
         unsafe_headers["X-Render-Error-Code"] = "mensagem com segredo"
         self.assertEqual(worker.safe_error_code(unsafe_headers), "render_http_error")
 
+    def test_quota_metadata_is_allowlisted_and_bounded(self):
+        headers = Message()
+        headers["X-Render-Quota-Scope"] = "rpd"
+        headers["X-Render-Quota-Value"] = "25"
+        headers["X-Render-Quota-Metric"] = "generativelanguage.googleapis.com/requests_per_day"
+        headers["X-Render-Quota-Id"] = "tts_requests"
+        headers["X-Render-Retry-After-Ms"] = "86400000"
+        headers["X-Render-TTS-Model"] = "gemini-3.8-flash-tts"
+        response_error = urllib.error.HTTPError("https://estudio.example/api/render?op=voice", 400, "Bad Request", headers, io.BytesIO(b'{"private":"ignored"}'))
+        with patch.object(worker.urllib.request, "urlopen", side_effect=response_error):
+            with self.assertRaises(worker.RenderError) as caught:
+                worker.post_studio("/api/render?op=voice", b"{}")
+        error = caught.exception
+        self.assertEqual((error.quota_scope, error.quota_value, error.quota_metric, error.quota_id, error.retry_after_ms, error.provider_model),
+                         ("rpd", 25.0, "generativelanguage.googleapis.com/requests_per_day", "tts_requests", 86_400_000, "gemini-3.8-flash-tts"))
+        self.assertEqual(response_error.fp.tell(), 0)
+        self.assertIsNone(worker.safe_quota_identifier("quota description: private script"))
+        self.assertIsNone(worker.safe_quota_value(float("inf")))
+        self.assertIsNone(worker.safe_retry_after(604_800_001))
+
+    def test_tts_chunks_cover_cues_once_in_order(self):
+        manifest = {
+            "cues": [{"index": 0, "text": "Primeira frase."}, {"index": 1, "text": "Segunda frase."}, {"index": 2, "text": "Terceira."}],
+            "ttsChunks": [
+                {"index": 0, "cueIndices": [0, 1], "text": "Primeira frase. Segunda frase."},
+                {"index": 1, "cueIndices": [2], "text": "Terceira."},
+            ],
+        }
+        mapping = worker.validate_tts_chunks(manifest)
+        self.assertEqual([mapping[index]["index"] for index in range(3)], [0, 0, 1])
+        invalid = json.loads(json.dumps(manifest))
+        invalid["ttsChunks"][1]["cueIndices"] = [0]
+        with self.assertRaises(worker.RenderError):
+            worker.validate_tts_chunks(invalid)
+
+    def test_caption_timing_uses_text_weights_and_nearby_silence(self):
+        self.assertEqual(worker.allocate_cue_timings(["A", "BBB"], 8.0), [(0.0, 2.0), (2.0, 8.0)])
+        self.assertEqual(worker.allocate_cue_timings(["Olá um", "Olá dois"], 10.0, [(4.7, 5.3)]), [(0.0, 4.7), (5.3, 10.0)])
+        self.assertEqual(worker.allocate_cue_timings(["A", "BBB"], 8.0, [(5.5, 6.0)]), [(0.0, 2.0), (2.0, 8.0)])
+        timings = worker.allocate_cue_timings(["A", "A", "A", "A", "A"], 5.0, [(0.7, 2.5)])
+        self.assertTrue(all(start <= end for start, end in timings))
+        self.assertTrue(all(timings[index][0] <= timings[index + 1][0] for index in range(len(timings) - 1)))
+
+    def test_silence_detection_parses_only_timestamps(self):
+        output = type("Probe", (), {"returncode": 0, "stderr": "[silencedetect] silence_start: 1.25\n[silencedetect] silence_end: 1.60 | silence_duration: 0.35\n"})()
+        with patch.object(worker.subprocess, "run", return_value=output):
+            self.assertEqual(worker.detect_silence_intervals(Path("fixture.wav")), [(1.25, 1.6)])
+
+    def test_worker_pauses_between_tts_chunks_only(self):
+        with patch.object(worker.time, "sleep") as sleep:
+            worker.pause_before_tts_chunk(0)
+            worker.pause_before_tts_chunk(1)
+        sleep.assert_called_once_with(1.0)
+
+    def test_fetch_voice_requests_chunk_index_and_validates_audio(self):
+        wav = b"RIFF" + (56).to_bytes(4, "little") + b"WAVE" + b"\x00" * 56
+        sent = {}
+        def fake_post(path, body, response_type="json", **kwargs):
+            sent.update(path=path, body=json.loads(body), response_type=response_type)
+            return wav, {}
+        probe = type("Probe", (), {"stdout": "3.5"})()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(worker, "post_studio", side_effect=fake_post), patch.object(worker.subprocess, "run", return_value=probe):
+            output = Path(tmp) / "chunk.wav"
+            duration = worker.fetch_voice("job-123", 4, output)
+            self.assertEqual(duration, 3.5)
+            self.assertEqual(sent, {"path": "/api/render?op=voice", "body": {"jobId": "job-123", "chunkIndex": 4}, "response_type": "binary"})
+            self.assertEqual(output.read_bytes(), wav)
+
     def test_http_error_keeps_only_operation_code_and_status(self):
         headers = Message()
         headers["X-Render-Error-Code"] = "tts_timeout"
         headers["X-Render-Upstream-Status"] = "429"
+        headers["X-Render-Quota-Scope"] = "rpd"
+        headers["X-Render-Quota-Value"] = "25"
+        headers["X-Render-Quota-Metric"] = "generativelanguage.googleapis.com/requests_per_day"
+        headers["X-Render-Quota-Id"] = "tts_requests"
+        headers["X-Render-Retry-After-Ms"] = "86400000"
+        headers["X-Render-TTS-Model"] = "gemini-3.8-flash-tts"
         private_body = b'{"message":"roteiro confidencial e chave privada"}'
         response_error = urllib.error.HTTPError(
             "https://estudio.example/api/render?op=voice", 400, "Bad Request", headers, io.BytesIO(private_body)
@@ -56,6 +130,7 @@ class RenderWorkerTests(unittest.TestCase):
                 worker.post_studio("/api/render?op=voice", b"{}")
         error = caught.exception
         self.assertEqual((error.operation, error.error_code, error.http_status, error.upstream_status), ("voice", "tts_timeout", 400, 429))
+        self.assertEqual((error.quota_scope, error.quota_value, error.retry_after_ms, error.provider_model), ("rpd", 25.0, 86_400_000, "gemini-3.8-flash-tts"))
         self.assertNotIn("roteiro confidencial", str(error))
         self.assertNotIn("chave privada", str(error))
         self.assertEqual(response_error.fp.tell(), 0, "O body da resposta não deve ser lido pelo worker")
@@ -73,13 +148,14 @@ class RenderWorkerTests(unittest.TestCase):
                 worker.callback(
                     {"jobId": str(uuid.uuid4())}, "failed", 90,
                     message="roteiro confidencial não deve ser enviado",
-                    diagnostic=worker.RenderError("mensagem privada", operation="voice", error_code="tts_timeout", http_status=400),
+                    diagnostic=worker.RenderError("mensagem privada", operation="voice", error_code="tts_quota_daily", http_status=400, upstream_status=429, quota_scope="rpd", quota_value=25, quota_metric="generativelanguage.googleapis.com/requests_per_day", quota_id="tts_requests", retry_after_ms=86_400_000, provider_model="gemini-3.8-flash-tts"),
                 )
         finally:
             worker.RUN_ID = old_run_id
         payload = sent["payload"]
         self.assertEqual(sent["path"], "/api/render?op=callback")
-        self.assertEqual((payload["errorOperation"], payload["errorCode"], payload["httpStatus"]), ("voice", "tts_timeout", 400))
+        self.assertEqual((payload["errorOperation"], payload["errorCode"], payload["httpStatus"]), ("voice", "tts_quota_daily", 400))
+        self.assertEqual((payload["quotaScope"], payload["quotaValue"], payload["quotaMetric"], payload["retryAfterMs"], payload["providerModel"]), ("rpd", 25.0, "generativelanguage.googleapis.com/requests_per_day", 86_400_000, "gemini-3.8-flash-tts"))
         self.assertNotIn("message", payload)
         self.assertNotIn("roteiro confidencial", json.dumps(payload))
         self.assertNotIn("mensagem privada", json.dumps(payload))
@@ -154,6 +230,50 @@ class RenderWorkerTests(unittest.TestCase):
                 self.assertGreater(duration, 0)
                 self.assertGreater(size, 10_000)
                 self.assertTrue(all(check["passed"] and check["verified"] for check in checks), checks)
+        finally:
+            worker.JOB_ID = previous_job
+            worker.callback = previous_callback
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg/ffprobe não instalados")
+    def test_local_tts_render_smoke_uses_audio_fixture_without_external_api(self):
+        previous_job = worker.JOB_ID
+        previous_callback = worker.callback
+        job_id = str(uuid.uuid4())
+        worker.JOB_ID = job_id
+        worker.callback = lambda *args, **kwargs: {"ok": True}
+        manifest = {
+            "jobId": job_id,
+            "title": "Fixture local de TTS",
+            "format": "Short",
+            "voiceMode": "TTS",
+            "cues": [{"index": 0, "section": "Teste", "text": "Primeira legenda do fixture."}, {"index": 1, "section": "Teste", "text": "Segunda legenda do fixture."}],
+            "ttsChunks": [{"index": 0, "cueIndices": [0], "text": "Primeira legenda do fixture."}, {"index": 1, "cueIndices": [1], "text": "Segunda legenda do fixture."}],
+            "codeBlocks": [],
+            "inputs": [],
+        }
+        try:
+            with tempfile.TemporaryDirectory(prefix="estudio-tts-fixture-") as directory:
+                root = Path(directory)
+                fixture = root / "fixture.wav"
+                subprocess_result = worker.subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", str(fixture)], check=True, stdout=worker.subprocess.DEVNULL, stderr=worker.subprocess.PIPE, text=True, timeout=30)
+                self.assertEqual(subprocess_result.returncode, 0)
+                render_dir = root / "render"
+                render_dir.mkdir()
+                def fixture_voice(_job_id, _chunk_index, output):
+                    shutil.copyfile(fixture, output)
+                    return float(worker.ffprobe(output)["format"]["duration"])
+                with patch.object(worker, "fetch_voice", side_effect=fixture_voice), patch.object(worker, "pause_before_tts_chunk") as pause:
+                    video, captions, _ = worker.create_video(manifest, render_dir)
+                    self.assertEqual([call.args for call in pause.call_args_list], [(0,), (1,)])
+                probe = worker.ffprobe(video)
+                checks, duration, size = worker.qa_result(video, captions, probe, manifest)
+                caption_check = next(check for check in checks if check["label"] == "captions")
+                self.assertTrue(video.is_file())
+                self.assertGreater(duration, 0)
+                self.assertGreater(size, 10_000)
+                self.assertTrue(all(check["passed"] and check["verified"] for check in checks), checks)
+                self.assertIn("sincronismo aproximado", caption_check["note"])
+                self.assertEqual(captions.read_text(encoding="utf-8").count("-->"), 2)
         finally:
             worker.JOB_ID = previous_job
             worker.callback = previous_callback

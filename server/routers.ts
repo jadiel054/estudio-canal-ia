@@ -13,7 +13,8 @@ import { parseStudioState, StateTooLargeError } from "./studioStateSchema";
 import { getRadarState, refreshRadar } from "./radar";
 import { generateScriptForIdea, reviewScriptForCurrentDraft } from "./scriptPipeline";
 import { generateSpeech, getTtsSettings, testTtsConnection, ttsSettingsSchema, updateTtsSettings } from "./ttsProvider";
-import { renderIntegrationStatus, requestRenderAssetCleanup, startRenderPipeline, uploadRenderInput } from "./renderPipeline";
+import { estimateRenderTtsCalls, renderIntegrationStatus, requestRenderAssetCleanup, startRenderPipeline, uploadRenderInput } from "./renderPipeline";
+import { getTtsUsageSummary } from "./ttsUsage";
 
 async function enforceLLMRateLimit(userId: string) { if (!(await consumeRateLimit(`llm:${userId}`, 20))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Limite de 20 chamadas LLM por minuto atingido. Tente novamente em instantes." }); }
 const taskSchema = z.enum(["roteiro", "qa", "agente", "leve"]);
@@ -79,6 +80,20 @@ export const appRouter = router({
     verifyPersistence: adminProcedure.mutation(() => verifyStudioDatabase()),
     state: adminProcedure.query(() => getStudioState()),
     renderIntegration: adminProcedure.query(() => renderIntegrationStatus()),
+    ttsUsage: adminProcedure.query(() => getTtsUsageSummary()),
+    setRenderVoiceMode: adminProcedure.input(z.object({ voiceMode: z.enum(["TTS", "Música + texto"]) })).mutation(async ({ input }) => {
+      const state = await getStudioState() as any;
+      if (!state) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Importe primeiro o estado do estúdio para o Neon." });
+      const now = new Date().toISOString();
+      try {
+        await saveStudioNonEditorialState({ ...state, settings: { ...state.settings, voiceMode: input.voiceMode }, audit: [{ id: randomUUID(), actor: "Você", action: "Modo de áudio do render alterado", target: input.voiceMode, at: now, detail: "Persistido antes do próximo job" }, ...(state.audit ?? [])].slice(0, 500) });
+      } catch (error) { throw toTrpcError(error); }
+      return { voiceMode: input.voiceMode } as const;
+    }),
+    renderTtsEstimate: adminProcedure.input(z.object({ ideaId: z.string().min(1).max(120) })).query(async ({ input }) => {
+      try { return await estimateRenderTtsCalls(input.ideaId); }
+      catch (error) { throw toTrpcError(error); }
+    }),
     cleanupRenderAsset: adminProcedure.input(z.object({ jobId: z.string().uuid() })).mutation(async ({ input }) => {
       try { return await requestRenderAssetCleanup(input.jobId); }
       catch (error) { throw toTrpcError(error); }
