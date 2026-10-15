@@ -2,10 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_TTS_SETTINGS, generateSpeech, generateSpeechCached, testTtsConnection, TTS_MODELS, TtsProviderError } from "./ttsProvider";
 
 const cacheEntries = vi.hoisted(() => new Map<string, Uint8Array>());
+const cacheHits = vi.hoisted(() => [] as Array<{ model: string; purpose: string }>);
+const usageEvents = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 vi.mock("./ttsCache", () => ({
-  getCachedTtsAudio: async (key: string) => { const audio = cacheEntries.get(key); return audio ? Buffer.from(audio) : undefined; },
+  getCachedTtsAudio: async (key: string, model: string, purpose = "render") => { const audio = cacheEntries.get(key); if (audio) cacheHits.push({ model, purpose }); return audio ? Buffer.from(audio) : undefined; },
   saveCachedTtsAudio: async (entry: { cacheKey: string; audio: Buffer }) => { cacheEntries.set(entry.cacheKey, new Uint8Array(entry.audio)); return true; },
   ttsAudioCacheKey: (value: { text: string; model: string; voice: string; style: string }) => JSON.stringify([value.model, value.voice, value.style, value.text.trim()]),
+}));
+vi.mock("./ttsUsage", () => ({
+  recordTtsApiCall: async (event: Record<string, unknown>) => { usageEvents.push(event); return true; },
 }));
 
 function sampleWav(sampleRate = 24_000) {
@@ -48,6 +53,8 @@ function okResponse(audio = sampleWav()) {
 afterEach(() => {
   vi.useRealTimers();
   cacheEntries.clear();
+  cacheHits.length = 0;
+  usageEvents.length = 0;
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
@@ -145,6 +152,23 @@ describe("Gemini TTS adapter", () => {
     expect(resumed).toMatchObject({ cached: true, model: DEFAULT_TTS_SETTINGS.primaryModel });
     expect(resumed.audio).toEqual(first.audio);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses the exact TTS sample on repeat and records both calls as connection_test", async () => {
+    vi.stubEnv("STUDIO_LLM_GEMINI_KEY", "unit-test-key");
+    const fetchMock = vi.fn(async () => okResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    const sampleText = "Olá! Este é um teste de voz em português brasileiro para o Estúdio de Canal IA.";
+
+    const first = await generateSpeechCached(sampleText, DEFAULT_TTS_SETTINGS, undefined, "connection_test");
+    const second = await generateSpeechCached(sampleText, DEFAULT_TTS_SETTINGS, undefined, "connection_test");
+
+    expect(first.cached).toBe(false);
+    expect(second).toMatchObject({ cached: true, model: DEFAULT_TTS_SETTINGS.primaryModel });
+    expect(second.audio).toEqual(first.audio);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(usageEvents).toContainEqual(expect.objectContaining({ purpose: "connection_test", outcome: "success" }));
+    expect(cacheHits).toEqual([{ model: DEFAULT_TTS_SETTINGS.primaryModel, purpose: "connection_test" }]);
   });
 
   it("logs only HTTP status and a sanitized structural summary when audio is missing", async () => {
