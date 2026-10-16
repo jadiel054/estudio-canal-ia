@@ -17,6 +17,7 @@ import {
   type ImageReservation,
 } from "./imageCache";
 import { validateImagePayload, type ValidatedImage } from "./imageValidation";
+import { createConfiguredCloudflareImageProvider } from "./cloudflareImageProvider";
 
 const MAX_VISUAL_DIRECTION_CHARS = 8_000;
 
@@ -481,7 +482,10 @@ export function createImageGenerationAdapter(options: {
   };
 }
 
+export type ImageGenerationAdapter = ReturnType<typeof createImageGenerationAdapter>;
+
 /** Instância de servidor: sem provider configurado, política inativa e sem transporte externo. */
 export const imageGenerationAdapter = createImageGenerationAdapter({
   store: new PostgresImageStore(),
+  provider: createConfiguredCloudflareImageProvider(),
 });

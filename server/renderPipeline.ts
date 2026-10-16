@@ -7,6 +7,7 @@ import { generateSpeechCached, getTtsSettings, MAX_TTS_ATTEMPTS_PER_MODEL, TTS_N
 import { getCachedTtsKeys, ttsAudioCacheKey } from "./ttsCache";
 import { isRenderErrorCode, isRenderOperation, renderFailureSummary, RenderCallbackStageError, type RenderCallbackStageCode, type RenderErrorCode, type RenderOperation } from "./renderObservability";
 import { IMAGE_GENERATION_POLICY, imageCacheKey } from "./imagePolicy";
+import { imageGenerationAdapter, type ImageGenerationAdapter, type ImageGenerationResult } from "./imageGeneration";
 
 const OWNER = "jadiel054";
 const REPOSITORY = "estudio-canal-ia";
@@ -86,6 +87,51 @@ export function renderIntegrationStatus() {
 }
 
 export type GitHubActionsConnectionResult = { listStatus: number | null; draftFound: boolean; getByIdStatus: number | null; latencyMs: number };
+
+export type RenderVisualPreparation = {
+  sectionIndex: number;
+  status: ImageGenerationResult["status"];
+  reason?: string;
+};
+
+function renderImageDimensions(format: string): { width: number; height: number } {
+  return format === "Short" ? { width: 1080, height: 1920 } : { width: 1280, height: 720 };
+}
+
+/** Prepara imagens de seção sem incluir prompt ou segredo em logs; falha visual sempre usa o fallback do worker. */
+export async function prepareRenderVisuals(input: {
+  scriptContent: string;
+  videoId: string;
+  jobId: string;
+  format: string;
+  adapter?: ImageGenerationAdapter;
+}): Promise<RenderVisualPreparation[]> {
+  const adapter = input.adapter ?? imageGenerationAdapter;
+  const visuals = extractScriptVisuals(input.scriptContent).visualDirections.slice(0, IMAGE_GENERATION_POLICY.maxImagesPerVideo);
+  const dimensions = renderImageDimensions(input.format);
+  const results: RenderVisualPreparation[] = [];
+  for (const visual of visuals) {
+    try {
+      const result = await adapter.generate({
+        visualDirection: visual.text,
+        preset: IMAGE_GENERATION_POLICY.preset,
+        width: dimensions.width,
+        height: dimensions.height,
+        videoId: input.videoId,
+        jobId: input.jobId,
+        sectionIndex: visual.sectionIndex,
+      });
+      results.push({
+        sectionIndex: visual.sectionIndex,
+        status: result.status,
+        ...("reason" in result && result.reason ? { reason: result.reason } : {}),
+      });
+    } catch {
+      results.push({ sectionIndex: visual.sectionIndex, status: "unavailable", reason: "preparation_failed" });
+    }
+  }
+  return results;
+}
 
 function firstReleaseProbeFields(value: unknown): { releaseId: number | null; draftFound: boolean } {
   const first = Array.isArray(value) ? value[0] : null;
@@ -194,6 +240,14 @@ export async function startRenderPipeline(ideaId: string) {
       await connection.query("ROLLBACK");
       throw error;
     } finally { connection.release(); }
+
+    // A preparação é best-effort: o worker conserva captura e focus frame como fallback.
+    await prepareRenderVisuals({
+      scriptContent: stateToReturn.scripts?.find((item: any) => item.id === stateToReturn.videos?.[0]?.scriptId)?.content ?? "",
+      videoId: stateToReturn.videos?.find((item: any) => item.renderJobId === jobId)?.id ?? "",
+      jobId,
+      format: stateToReturn.videos?.find((item: any) => item.renderJobId === jobId)?.format ?? "Longo",
+    });
 
     failureStage = "dispatch";
     logStartRender(attemptId, startedAt, "dispatch_started");
