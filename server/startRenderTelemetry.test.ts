@@ -110,6 +110,34 @@ describe("telemetria de studio.startRender", () => {
     expect(queries).toContain("COMMIT");
   });
 
+  it("bloqueia lint com error antes de persistir job ou despachar o workflow", async () => {
+    const { state, queries, connection } = setup();
+    const privateUnlabeledText = "PRIVATE_UNLABELED_TEXT_NOT_FOR_LOGS";
+    state.scripts[0].content = `${privateUnlabeledText}\n\n**Áudio (Narração):** Fala válida.`;
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(startRenderPipeline(ideaId)).rejects.toThrow("script_unlabeled_paragraph");
+    const records = logRecords(info);
+    const serialized = JSON.stringify(records);
+    const stages = records.map(record => record.stage);
+
+    expect(stages).toContain("studio_state_lock_acquired");
+    expect(stages).toContain("failure");
+    expect(stages).not.toContain("job_persist_started");
+    expect(stages).not.toContain("commit_started");
+    expect(stages).not.toContain("dispatch_started");
+    expect(records.find(record => record.stage === "failure")).toMatchObject({ failureStage: "validation", failureKind: "validation_error" });
+    expect(queries.some(sql => sql.startsWith("INSERT INTO"))).toBe(false);
+    expect(queries).toContain("ROLLBACK");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(state.renderJobs).toEqual([]);
+    expect(state.videos).toEqual([]);
+    expect(serialized).not.toContain(privateUnlabeledText);
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  });
+
   it("deixa breadcrumbs anteriores ao COMMIT quando o SELECT FOR UPDATE falha e não despacha", async () => {
     const lockError = new Error("PRIVATE_DATABASE_ERROR_NOT_FOR_LOGS");
     const { queries, connection } = setup({ lockError });

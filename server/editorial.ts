@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { canApproveScript, canApproveVideo, canEditScript, canGenerateScript, canRejectVideo, canRequestVideoAdjustment, canSchedule, canStartRender } from "@shared/workflowPolicy";
 import { appendStudioAudit, getStudioState, saveStudioState, stateVersion } from "./studioRepository";
+import { assertScriptRenderable } from "./renderManifest";
 
 export type EditorialActor = "Você" | "Nexo" | "Sistema";
 
@@ -82,6 +83,7 @@ export async function executeEditorialCommand(command: EditorialCommand, context
     case "approveScript": {
       const idea = state.ideas?.find((item: any) => item.id === command.ideaId); const script = state.scripts?.find((item: any) => item.ideaId === command.ideaId); if (!idea || !script) fail("Pauta ou roteiro não encontrado.");
       if (!script.qa) fail("Execute o QA automático do roteiro antes de decidir o Portão 1.");
+      assertScriptRenderable(script.content);
       const guard = canApproveScript(idea.status, script.status); if (!guard.allowed) fail(guard.reason);
       idea.status = "assets"; script.status = "Aprovado"; script.updatedAt = now; target = idea.title; audit(state, actor, "Portão 1 aprovado", target, "Liberado para assets e produção"); break;
     }
@@ -92,6 +94,7 @@ export async function executeEditorialCommand(command: EditorialCommand, context
     case "startRender": {
       const idea = state.ideas?.find((item: any) => item.id === command.ideaId); const script = state.scripts?.find((item: any) => item.ideaId === command.ideaId); if (!idea || !script) fail("Pauta ou roteiro não encontrado.");
       const guard = canStartRender(idea.status, script.status); if (!guard.allowed) fail(guard.reason);
+      assertScriptRenderable(script.content);
       // RENDER SIMULADO: não existe FFmpeg nem arquivo final neste corte.
       // Vídeo e job ficam marcados como `simulado` e o QA é registrado como NÃO
       // VERIFICADO — nada aqui é apresentado como aprovado de verdade.
