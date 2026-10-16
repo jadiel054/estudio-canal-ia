@@ -16,7 +16,7 @@ describe("configuração Vercel do app Express", () => {
     expect(config.rewrites).toEqual(expect.arrayContaining([
       expect.objectContaining({ source: "/api/render/download/:jobId", destination: "/api/render?delivery=download&jobId=:jobId" }),
       expect.objectContaining({ source: "/api/render/preview/:jobId", destination: "/api/render?delivery=preview&jobId=:jobId" }),
-      expect.objectContaining({ source: "/api/integrations/:path*", destination: "/api/integrations" }),
+      expect.objectContaining({ source: "/api/integrations/:path*", destination: "/api/integrations?__segments=:path*" }),
     ]));
   });
 

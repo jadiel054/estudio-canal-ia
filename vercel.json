@@ -17,7 +17,7 @@
     },
     {
       "source": "/api/integrations/:path*",
-      "destination": "/api/integrations"
+      "destination": "/api/integrations?__segments=:path*"
     },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ]

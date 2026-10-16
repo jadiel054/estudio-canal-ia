@@ -96,6 +96,7 @@ export function registerApiRoutes(app: Express) {
     res.set("Cache-Control", "no-store").type("application/javascript").send(publicPlatformScript());
   });
 
+  app.use(restoreYouTubeIntegrationPath);
   app.get("/api/integrations/youtube/start", async (req, res) => {
     const user = await readSession(req);
     if (!user) return res.status(401).json({ error: "unauthorized" });
@@ -182,4 +183,18 @@ export function registerApiRoutes(app: Express) {
       createContext,
     }),
   );
+}
+
+export function restoreYouTubeIntegrationPath(req: express.Request, _res: express.Response, next: express.NextFunction) {
+  const segments = req.query.__segments;
+  if (typeof segments === "string" && /^[a-z0-9/_-]+$/i.test(segments) && !segments.includes("//")) {
+    const queryIndex = req.url.indexOf("?");
+    const params = new URLSearchParams(queryIndex >= 0 ? req.url.slice(queryIndex + 1) : "");
+    params.delete("__segments");
+    const encodedQuery = params.toString();
+    const rest = encodedQuery ? `?${encodedQuery}` : "";
+    req.url = `/api/integrations/${segments}${rest}`;
+    delete req.query.__segments;
+  }
+  next();
 }
