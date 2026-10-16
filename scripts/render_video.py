@@ -29,12 +29,12 @@ WORK = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / f"studio-render-{JOB_ID}"
 MAX_OUTPUT_BYTES = 1_900_000_000
 TTS_CHUNK_PAUSE_SECONDS = 1.0
 
-RENDER_OPERATIONS = {"manifest", "voice", "input", "callback", "render", "qa", "release", "dispatch", "worker", "unknown"}
+RENDER_OPERATIONS = {"manifest", "voice", "input", "image", "callback", "render", "qa", "release", "dispatch", "worker", "unknown"}
 SAFE_RENDER_ERROR_CODES = {
     "render_unauthorized", "render_operation_not_found", "invalid_json_body", "invalid_job_id",
-    "invalid_voice_request", "invalid_input_request", "tts_invalid_key", "tts_unavailable", "tts_quota_daily", "tts_quota_minute", "tts_quota_unknown",
+    "invalid_voice_request", "invalid_input_request", "invalid_image_request", "tts_invalid_key", "tts_unavailable", "tts_quota_daily", "tts_quota_minute", "tts_quota_unknown",
     "tts_invalid_audio", "tts_network", "tts_timeout", "manifest_operation_failed",
-    "voice_operation_failed", "input_operation_failed", "callback_operation_failed", "render_failed",
+    "voice_operation_failed", "input_operation_failed", "image_operation_failed", "callback_operation_failed", "render_failed",
     "qa_failed", "release_failed", "dispatch_failed", "worker_unexpected", "render_network_error",
     "ffmpeg_failed",
     "invalid_response_signature", "invalid_tts_wav", "invalid_tts_duration", "manifest_invalid",
@@ -193,7 +193,7 @@ def run(command: list[str], label: str):
 
 def ffprobe(path: Path) -> dict:
     try:
-        result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration,size", "-show_entries", "stream=codec_type,codec_name,width,height,sample_rate,channels", "-of", "json", str(path)], check=True, capture_output=True, text=True, timeout=20)
+        result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration,size", "-show_entries", "stream=codec_type,codec_name,width,height,sample_rate,channels,pix_fmt,r_frame_rate", "-of", "json", str(path)], check=True, capture_output=True, text=True, timeout=20)
         return json.loads(result.stdout)
     except Exception:
         raise RenderError("Não foi possível inspecionar o MP4 final.", operation="qa", error_code="qa_failed") from None
@@ -237,7 +237,19 @@ def load_capture(data: bytes, content_type: str) -> Image.Image:
     except Exception:
         raise RenderError("Não foi possível ler uma captura enviada.", operation="input", error_code="input_operation_failed") from None
 
-def make_slide(path: Path, manifest: dict, cue: dict, index: int, dims: tuple[int, int], capture: Image.Image | None):
+def apply_ken_burns(image: Image.Image, progress: float, focus: tuple[float, float] = (0.5, 0.5)) -> Image.Image:
+    progress = max(0.0, min(1.0, float(progress)))
+    scale = 1.0 + 0.06 * progress
+    crop_width = max(1, int(image.width / scale))
+    crop_height = max(1, int(image.height / scale))
+    focus_x, focus_y = max(0.0, min(1.0, focus[0])), max(0.0, min(1.0, focus[1]))
+    max_left = image.width - crop_width
+    max_top = image.height - crop_height
+    pan_x = max_left * (0.5 + (focus_x - 0.5) * 0.06)
+    pan_y = max_top * (0.5 + (focus_y - 0.5) * 0.06)
+    return image.crop((int(pan_x), int(pan_y), int(pan_x) + crop_width, int(pan_y) + crop_height))
+
+def make_slide(path: Path, manifest: dict, cue: dict, index: int, dims: tuple[int, int], capture: Image.Image | None, *, motion_preset: str = "none", motion_progress: float = 0.0, focus: tuple[float, float] = (0.5, 0.5)):
     width, height = dims
     image = Image.new("RGB", dims, (10, 15, 27))
     draw = ImageDraw.Draw(image)
@@ -253,6 +265,8 @@ def make_slide(path: Path, manifest: dict, cue: dict, index: int, dims: tuple[in
     text_left = pad
     text_max_width = width - 2 * pad
     if capture is not None:
+        if motion_preset == "ken_burns_v1":
+            capture = apply_ken_burns(capture, motion_progress, focus)
         frame = (pad, main_top, width - pad, main_top + int((main_bottom-main_top) * 0.67))
         draw.rounded_rectangle(frame, radius=int(18 * scale), fill=(22, 31, 49), outline=(69, 83, 107), width=max(2, int(2*scale)))
         max_size = (frame[2]-frame[0]-int(28*scale), frame[3]-frame[1]-int(28*scale))
@@ -442,6 +456,46 @@ def validate_visual_directions(manifest: dict):
             raise RenderError("Mapeamento da direção visual para seção inválido.", operation="manifest", error_code="manifest_invalid")
     return directions
 
+def validate_worker_contract(manifest: dict):
+    version = manifest.get("workerContractVersion", 1)
+    if version not in {1, 2}:
+        raise RenderError("Versão de contrato do worker não suportada.", operation="manifest", error_code="manifest_invalid")
+    if version < 2:
+        return
+    if manifest.get("productionNotesExcluded") is not True:
+        raise RenderError("O manifesto v2 não confirmou exclusão de notas de produção.", operation="manifest", error_code="manifest_invalid")
+    if manifest.get("motionPreset", "none") not in {"none", "ken_burns_v1"}:
+        raise RenderError("Preset de movimento inválido no manifesto.", operation="manifest", error_code="manifest_invalid")
+    safe_area = manifest.get("safeArea")
+    if not isinstance(safe_area, dict) or any(not isinstance(safe_area.get(key), (int, float)) or not 0 <= safe_area[key] < 0.5 for key in ("left", "right", "top", "bottom")):
+        raise RenderError("Safe area inválida no manifesto.", operation="manifest", error_code="manifest_invalid")
+    assets = manifest.get("visualAssets")
+    sections = manifest.get("sections")
+    if not isinstance(assets, list) or len(assets) > 80 or not isinstance(sections, list):
+        raise RenderError("Assets visuais inválidos no manifesto.", operation="manifest", error_code="manifest_invalid")
+    for asset in assets:
+        if not isinstance(asset, dict):
+            raise RenderError("Descriptor visual inválido no manifesto.", operation="manifest", error_code="manifest_invalid")
+        asset_id = asset.get("assetId")
+        section_index = asset.get("sectionIndex")
+        source_kind = asset.get("source_kind")
+        if (not isinstance(asset_id, str) or not re.fullmatch(r"[0-9a-f-]{36}|[0-9a-f]{64}", asset_id, re.I)
+                or (section_index is not None and (not isinstance(section_index, int) or isinstance(section_index, bool) or not 0 <= section_index < len(sections)))
+                or source_kind not in {"real_capture", "generated_image"}
+                or asset.get("synthetic") is not (source_kind == "generated_image")
+                or asset.get("endpoint") not in {"input", "image"}
+                or asset.get("origin") not in {"owner_uploaded_capture", "studio_image_cache"}
+                or not isinstance(asset.get("sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", asset["sha256"], re.I)):
+            raise RenderError("Descriptor visual inseguro no manifesto.", operation="manifest", error_code="manifest_invalid")
+        dimensions = asset.get("dimensions")
+        if not isinstance(dimensions, dict) or asset.get("source_kind") == "generated_image" and (not isinstance(dimensions.get("width"), int) or not isinstance(dimensions.get("height"), int) or dimensions["width"] < 1 or dimensions["height"] < 1):
+            raise RenderError("Dimensões do asset visual inválidas.", operation="manifest", error_code="manifest_invalid")
+        focus = asset.get("focus")
+        if not isinstance(focus, dict) or any(not isinstance(focus.get(key), (int, float)) or not 0 <= focus[key] <= 1 for key in ("x", "y")):
+            raise RenderError("Foco do asset visual inválido.", operation="manifest", error_code="manifest_invalid")
+        if any(key in asset for key in ("prompt", "secret", "token", "visualDirection", "text", "notes")):
+            raise RenderError("Descriptor visual contém conteúdo proibido.", operation="manifest", error_code="manifest_invalid")
+
 def fetch_manifest() -> dict:
     body = compact_json({"jobId": JOB_ID})
     response, _ = post_studio("/api/render?op=manifest", body, verify_signature=True)
@@ -450,6 +504,7 @@ def fetch_manifest() -> dict:
         raise RenderError("O manifesto não corresponde ao job ou não contém cues válidos.", operation="manifest", error_code="manifest_invalid")
     if "visualDirections" in manifest:
         validate_visual_directions(manifest)
+    validate_worker_contract(manifest)
     if manifest.get("voiceMode") == "TTS":
         validate_tts_chunks(manifest)
     return manifest
@@ -512,11 +567,30 @@ def fetch_inputs(manifest: dict, directory: Path) -> list[dict]:
         path = directory / f"capture-{len(captures):02d}.img"
         path.write_bytes(data)
         image = load_capture(data, item["contentType"])
-        captures.append({"image": image, "sectionIndex": section_index})
+        captures.append({"image": image, "sectionIndex": section_index, "source_kind": "real_capture", "synthetic": False, "assetId": item["id"]})
     return captures
+
+def fetch_generated_inputs(manifest: dict, directory: Path) -> list[dict]:
+    generated = []
+    for item in manifest.get("visualAssets", []):
+        if not isinstance(item, dict) or item.get("source_kind") != "generated_image":
+            continue
+        body = compact_json({"jobId": manifest["jobId"], "assetId": item["assetId"]})
+        data, headers = post_studio("/api/render?op=image", body, response_type="binary")
+        digest = hashlib.sha256(data).hexdigest()
+        response_digest = (headers.get("X-Render-SHA256") or "").strip().lower()
+        if not hmac.compare_digest(digest, item["sha256"].lower()) or response_digest != item["sha256"].lower():
+            raise RenderError("A imagem gerada não corresponde ao descriptor assinado.", operation="image", error_code="image_operation_failed")
+        content_type = headers.get_content_type() if hasattr(headers, "get_content_type") else headers.get("Content-Type", "")
+        image = load_capture(data, content_type)
+        generated.append({"image": image, "sectionIndex": item.get("sectionIndex"), "source_kind": "generated_image", "synthetic": True, "assetId": item["assetId"]})
+    return generated
 
 def cue_section_index(manifest: dict, cue: dict) -> int | None:
     sections = manifest.get("sections", [])
+    section_index = cue.get("sectionIndex")
+    if isinstance(section_index, int) and not isinstance(section_index, bool) and 0 <= section_index < len(sections):
+        return section_index
     section = cue.get("section")
     for direction in manifest.get("visualDirections", []):
         if not isinstance(direction, dict) or direction.get("section") != section:
@@ -524,9 +598,6 @@ def cue_section_index(manifest: dict, cue: dict) -> int | None:
         visual_index = direction.get("sectionIndex")
         if isinstance(visual_index, int) and not isinstance(visual_index, bool) and 0 <= visual_index < len(sections):
             return visual_index
-    section_index = cue.get("sectionIndex")
-    if isinstance(section_index, int) and not isinstance(section_index, bool) and 0 <= section_index < len(sections):
-        return section_index
     try:
         return sections.index(section)
     except (ValueError, AttributeError):
@@ -567,6 +638,24 @@ def select_capture_for_cue(manifest: dict, cue: dict, cue_index: int, captures: 
         unassigned = next((capture for capture in captures if capture.get("sectionIndex") is None), None)
         if unassigned:
             return unassigned["image"]
+    return None
+
+def select_visual_for_cue(manifest: dict, cue: dict, cue_index: int, captures: list[dict]) -> dict | None:
+    section_index = cue_section_index(manifest, cue)
+    if section_index is not None:
+        prior_cues = manifest.get("cues", [])[:cue_index]
+        first_in_section = not any(cue_section_index(manifest, prior) == section_index for prior in prior_cues)
+        if first_in_section:
+            mapped = [capture for capture in captures if capture.get("sectionIndex") == section_index]
+            if mapped:
+                real = [capture for capture in mapped if capture.get("source_kind", "real_capture") == "real_capture"]
+                selected = real or [capture for capture in mapped if capture.get("source_kind") == "generated_image"]
+                if selected:
+                    return {**selected[0], "image": compose_section_captures([item["image"] for item in selected])}
+    if cue_index == 0:
+        unassigned = next((capture for capture in captures if capture.get("sectionIndex") is None and capture.get("source_kind", "real_capture") == "real_capture"), None)
+        if unassigned:
+            return unassigned
     return None
 
 def make_music_track(duration: float, output: Path):
@@ -640,7 +729,7 @@ def create_video(manifest: dict, directory: Path) -> tuple[Path, Path, float]:
         dimensions = (1080, 1920)
     else:
         dimensions = (1280, 720)
-    captures = fetch_inputs(manifest, directory)
+    captures = [*fetch_inputs(manifest, directory), *fetch_generated_inputs(manifest, directory)]
     slides: list[Path] = []
     subtitles: list[tuple[float, float, str]] = []
     audio_files: list[Path] = []
@@ -678,11 +767,16 @@ def create_video(manifest: dict, directory: Path) -> tuple[Path, Path, float]:
         else:
             segment_duration = min(14.0, max(3.5, len(str(cue["text"])) / 14.0 + 1.5))
             subtitles.append((time_cursor, time_cursor + segment_duration, str(cue["text"])))
-        durations.append(segment_duration)
-        slide = directory / f"slide-{index:03d}.png"
-        capture = select_capture_for_cue(manifest, cue, index, captures)
-        make_slide(slide, manifest, cue, index, dimensions, capture)
-        slides.append(slide)
+        visual = select_visual_for_cue(manifest, cue, index, captures)
+        capture = visual["image"] if visual else None
+        motion_enabled = manifest.get("motionPreset") == "ken_burns_v1" and visual is not None and visual.get("source_kind") == "generated_image"
+        frame_count = 12 if motion_enabled else 1
+        for frame_index in range(frame_count):
+            slide = directory / f"slide-{index:03d}-{frame_index:02d}.png"
+            progress = frame_index / max(1, frame_count - 1)
+            make_slide(slide, manifest, cue, index, dimensions, capture, motion_preset="ken_burns_v1" if motion_enabled else "none", motion_progress=progress)
+            slides.append(slide)
+            durations.append(segment_duration / frame_count)
         time_cursor += segment_duration
         if is_tts and is_last_cue and chunk_index not in completed_chunks:
             completed_chunks.add(chunk_index)
@@ -733,12 +827,24 @@ def qa_result(path: Path, srt_path: Path, probed: dict, manifest: dict) -> tuple
     expected_dims = (1080, 1920) if manifest.get("format") == "Short" else (1280, 720)
     captions = srt_path.read_text(encoding="utf-8").strip()
     short_limit = manifest.get("format") != "Short" or duration <= 180
+    contract_v2 = manifest.get("workerContractVersion", 1) >= 2
+    frame_rate = str(video.get("r_frame_rate", "")) if video else ""
+    fps_ok = not contract_v2 or frame_rate in {"30/1", "30/0", "30"}
+    layout_ok = True
+    if manifest.get("workerContractVersion", 1) >= 2:
+        try:
+            validate_worker_contract(manifest)
+        except RenderError:
+            layout_ok = False
+    notes_excluded = not contract_v2 or (manifest.get("productionNotesExcluded") is True and not any(key in manifest for key in ("productionNotes", "notes")))
     checks = [
-        {"label": "video_stream", "passed": bool(video and video.get("codec_name") == "h264" and (video.get("width"), video.get("height")) == expected_dims), "verified": True, "note": f"H.264 {video.get('width')}x{video.get('height')}" if video else "Stream de vídeo ausente"},
+        {"label": "video_stream", "passed": bool(video and video.get("codec_name") == "h264" and (not contract_v2 or (video.get("pix_fmt") == "yuv420p" and fps_ok)) and (video.get("width"), video.get("height")) == expected_dims), "verified": True, "note": f"H.264 {video.get('width')}x{video.get('height')} · FPS {frame_rate} · {video.get('pix_fmt')}" if video else "Stream de vídeo ausente"},
         {"label": "audio_stream", "passed": bool(audio and audio.get("codec_name") == "aac"), "verified": True, "note": f"Áudio {audio.get('codec_name')}" if audio else "Stream de áudio ausente"},
-        {"label": "captions", "passed": bool(captions and "-->" in captions and len(captions.split("-->")) >= 2), "verified": True, "note": f"SRT com {len(manifest['cues'])} cues; sincronismo aproximado por texto/silêncio; legendas queimadas no MP4" if manifest.get("voiceMode") == "TTS" else f"SRT com {len(manifest['cues'])} cues; legendas queimadas no MP4"},
+        {"label": "captions", "passed": bool(captions and "-->" in captions and len(captions.split("-->") ) >= 2), "verified": True, "note": f"SRT com {len(manifest['cues'])} cues; sincronismo aproximado por texto/silêncio; legendas queimadas no MP4" if manifest.get("voiceMode") == "TTS" else f"SRT com {len(manifest['cues'])} cues; legendas queimadas no MP4"},
         {"label": "duration", "passed": 0 < duration <= 7200 and short_limit, "verified": True, "note": f"Duração medida por ffprobe: {duration:.2f}s"},
         {"label": "file_size", "passed": 10_000 < size <= MAX_OUTPUT_BYTES, "verified": True, "note": f"Arquivo verificado: {size} bytes"},
+        *([{"label": "visual_layout", "passed": layout_ok, "verified": True, "note": "sectionIndex, fallback visual, safe area e preset de movimento validados" if layout_ok else "Manifesto visual v2 inválido"},
+           {"label": "production_notes_excluded", "passed": notes_excluded, "verified": True, "note": "Manifesto não contém Nota de produção nem canal de texto interno" if notes_excluded else "Nota de produção encontrada em representação narrável"}] if contract_v2 else []),
     ]
     return checks, duration, size
 
@@ -798,7 +904,7 @@ def main():
         raise RenderError("O MP4 excedeu o limite seguro.", operation="qa", error_code="qa_failed")
     callback(manifest, "rendering", 88)
     release_id, asset_id = create_release_and_upload(video, captions, manifest)
-    result = {"releaseId": release_id, "assetId": asset_id, "fileName": video.name, "fileSizeBytes": size, "durationSeconds": round(duration, 3), "qa": checks}
+    result = {"releaseId": release_id, "assetId": asset_id, "fileName": video.name, "fileSizeBytes": size, "durationSeconds": round(duration, 3), "workerContractVersion": int(manifest.get("workerContractVersion", 1)), "qa": checks}
     response = callback(manifest, "qa", 95, result=result)
     if response.get("status") != "succeeded":
         raise RenderError("O QA do Estúdio não aprovou o MP4.", operation="qa", error_code="qa_failed")

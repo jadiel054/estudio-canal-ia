@@ -1,13 +1,13 @@
 import { TtsProviderError, type TtsModel } from "./ttsProvider";
 import type { TtsQuotaScope } from "./ttsUsage";
 
-export const RENDER_OPERATIONS = ["manifest", "voice", "input", "callback", "render", "qa", "release", "dispatch", "worker", "unknown"] as const;
+export const RENDER_OPERATIONS = ["manifest", "voice", "input", "image", "callback", "render", "qa", "release", "dispatch", "worker", "unknown"] as const;
 export type RenderOperation = typeof RENDER_OPERATIONS[number];
 
 export const RENDER_ERROR_CODES = [
-  "render_unauthorized", "render_operation_not_found", "invalid_json_body", "invalid_job_id", "invalid_voice_request", "invalid_input_request",
+  "render_unauthorized", "render_operation_not_found", "invalid_json_body", "invalid_job_id", "invalid_voice_request", "invalid_input_request", "invalid_image_request",
   "tts_invalid_key", "tts_unavailable", "tts_invalid_audio", "tts_network", "tts_timeout", "tts_quota_daily", "tts_quota_minute", "tts_quota_unknown",
-  "manifest_operation_failed", "voice_operation_failed", "input_operation_failed", "callback_operation_failed", "callback_signature_invalid", "callback_payload_invalid",
+  "manifest_operation_failed", "voice_operation_failed", "input_operation_failed", "image_operation_failed", "callback_operation_failed", "callback_signature_invalid", "callback_payload_invalid",
   "callback_idempotency_failed", "callback_job_state_rejected", "callback_release_verification_failed", "callback_database_update_failed", "render_failed", "qa_failed",
   "release_failed", "dispatch_failed", "worker_unexpected", "render_network_error", "ffmpeg_failed", "invalid_response_signature",
   "invalid_tts_wav", "invalid_tts_duration", "manifest_invalid", "callback_not_confirmed", "github_api_failed", "github_upload_failed", "render_http_error",
@@ -70,7 +70,7 @@ export function isRenderErrorCode(value: unknown): value is RenderErrorCode {
 }
 
 const OPERATION_FAILURE_CODE: Record<RenderOperation, RenderErrorCode> = {
-  manifest: "manifest_operation_failed", voice: "voice_operation_failed", input: "input_operation_failed", callback: "callback_operation_failed",
+  manifest: "manifest_operation_failed", voice: "voice_operation_failed", input: "input_operation_failed", image: "image_operation_failed", callback: "callback_operation_failed",
   render: "render_failed", qa: "qa_failed", release: "release_failed", dispatch: "dispatch_failed", worker: "worker_unexpected", unknown: "worker_unexpected",
 };
 const QUOTA_SCOPES: readonly TtsQuotaScope[] = ["rpm", "tpm", "rpd", "tpd", "unknown"];

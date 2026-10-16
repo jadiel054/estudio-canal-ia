@@ -7,7 +7,7 @@ import { studioPersistenceStatus, verifyStudioDatabase } from "./studioRepositor
 import { timingSafeEqual } from "node:crypto";
 import { refreshRadar } from "./radar";
 import { RENDER_PATHS, verifyRenderRequestSignature } from "./renderSecurity";
-import { getSignedRenderInput, getSignedRenderManifest, processRenderCallback, synthesizeRenderChunk } from "./renderPipeline";
+import { getSignedRenderImage, getSignedRenderInput, getSignedRenderManifest, processRenderCallback, synthesizeRenderChunk } from "./renderPipeline";
 import { callbackStageDiagnostic, classifyRenderFailure, isRenderCallbackStageCode, isRenderOperation, renderFailureLogRecord, type RenderErrorCode, type RenderOperation } from "./renderObservability";
 import { registerRenderDeliveryRoutes } from "./renderDelivery";
 
@@ -98,7 +98,7 @@ export function registerApiRoutes(app: Express) {
   app.post("/api/render", async (req, res) => {
     const operation = typeof req.query.op === "string" ? req.query.op : "";
     const safeOperation: RenderOperation = isRenderOperation(operation) ? operation : "unknown";
-    const signedPath = operation === "manifest" ? RENDER_PATHS.manifest : operation === "voice" ? RENDER_PATHS.voice : operation === "input" ? RENDER_PATHS.input : operation === "callback" ? RENDER_PATHS.callback : undefined;
+    const signedPath = operation === "manifest" ? RENDER_PATHS.manifest : operation === "voice" ? RENDER_PATHS.voice : operation === "input" ? RENDER_PATHS.input : operation === "image" ? RENDER_PATHS.image : operation === "callback" ? RENDER_PATHS.callback : undefined;
     if (!signedPath) return sendRenderFailure(res, safeOperation, 404, "render_operation_not_found");
     const rawBody = (req as typeof req & { rawBody?: Buffer }).rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}), "utf8");
     if (!verifyRenderRequestSignature(rawBody, req.get("x-render-signature"), process.env.STUDIO_RENDER_HMAC_SECRET, { method: "POST", path: signedPath })) {
@@ -131,6 +131,12 @@ export function registerApiRoutes(app: Express) {
       if (operation === "input") {
         if (typeof req.body.jobId !== "string" || !/^[0-9a-f-]{36}$/i.test(req.body.jobId) || typeof req.body.inputAssetId !== "string" || !/^[0-9a-f-]{36}$/i.test(req.body.inputAssetId)) return sendRenderFailure(res, safeOperation, 400, "invalid_input_request");
         const result = await getSignedRenderInput(req.body.jobId, req.body.inputAssetId);
+        res.set("X-Render-Response-Signature", result.signature).set("X-Render-SHA256", result.sha256).set("X-Render-File-Name", result.fileName).type(result.contentType).send(result.data);
+        return;
+      }
+      if (operation === "image") {
+        if (typeof req.body.jobId !== "string" || !/^[0-9a-f-]{36}$/i.test(req.body.jobId) || typeof req.body.assetId !== "string" || !/^[a-f0-9]{64}$/i.test(req.body.assetId)) return sendRenderFailure(res, safeOperation, 400, "invalid_image_request");
+        const result = await getSignedRenderImage(req.body.jobId, req.body.assetId);
         res.set("X-Render-Response-Signature", result.signature).set("X-Render-SHA256", result.sha256).set("X-Render-File-Name", result.fileName).type(result.contentType).send(result.data);
         return;
       }

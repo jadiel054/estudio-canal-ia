@@ -6,6 +6,7 @@ import { getStudioPool, getStudioState, stateVersion } from "./studioRepository"
 import { generateSpeechCached, getTtsSettings, MAX_TTS_ATTEMPTS_PER_MODEL, TTS_NARRATION_STYLE } from "./ttsProvider";
 import { getCachedTtsKeys, ttsAudioCacheKey } from "./ttsCache";
 import { isRenderErrorCode, isRenderOperation, renderFailureSummary, RenderCallbackStageError, type RenderCallbackStageCode, type RenderErrorCode, type RenderOperation } from "./renderObservability";
+import { IMAGE_GENERATION_POLICY, imageCacheKey } from "./imagePolicy";
 
 const OWNER = "jadiel054";
 const REPOSITORY = "estudio-canal-ia";
@@ -14,6 +15,7 @@ const CLEANUP_WORKFLOW_FILE = "render-cleanup.yml";
 const JOB_ACTIVE = ["queued", "rendering", "qa"] as const;
 const REQUIRED_QA_LABELS = ["video_stream", "audio_stream", "captions", "duration", "file_size"];
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const WORKER_CONTRACT_VERSION = 2 as const;
 
 export const START_RENDER_LOG_STAGES = [
   "entry", "neon_connection_wait_started", "neon_connection_acquired",
@@ -258,7 +260,24 @@ export type RenderManifest = {
   codeBlocks: string[]; sections: string[]; visualDirections: ReturnType<typeof extractScriptVisuals>["visualDirections"];
   references: string[]; voiceMode: "TTS" | "Música + texto";
   inputs: Array<{ id: string; fileName: string; contentType: string; sizeBytes: number; sha256: string; label: string; sectionIndex: number | null }>;
+  workerContractVersion: typeof WORKER_CONTRACT_VERSION;
+  motionPreset: "none" | "ken_burns_v1";
+  visualAssets: VisualAssetDescriptor[];
+  safeArea: { left: number; right: number; top: number; bottom: number };
+  productionNotesExcluded: true;
   tts: { primaryModel: string; fallbackModel: string; voice: string };
+};
+
+export type VisualAssetDescriptor = {
+  assetId: string;
+  sectionIndex: number | null;
+  origin: "owner_uploaded_capture" | "studio_image_cache";
+  endpoint: "input" | "image";
+  source_kind: "real_capture" | "generated_image";
+  synthetic: boolean;
+  sha256: string;
+  dimensions: { width: number | null; height: number | null };
+  focus: { x: number; y: number };
 };
 
 function sectionIndexForInput(state: any, inputId: string, scriptId: string, scriptVersion: number, sectionCount: number): number | null {
@@ -282,12 +301,67 @@ export async function getSignedRenderManifest(jobId: string) {
   const inputResult = await pool.query<{ id: string; file_name: string; content_type: string; file_size_bytes: number; sha256: string }>("SELECT id::text, file_name, content_type, file_size_bytes, sha256 FROM studio_render_inputs WHERE script_id = $1 AND script_version = $2 ORDER BY created_at ASC LIMIT 5", [script.id, script.version]);
   const voiceMode = state.settings?.voiceMode === "Música + texto" ? "Música + texto" : "TTS";
   const ttsChunks = voiceMode === "TTS" ? buildNarrationChunks(visuals.cues) : [];
+  const dimensions = idea.format === "Short" ? { width: 1080, height: 1920 } : { width: 1280, height: 720 };
+  const visualAssets: VisualAssetDescriptor[] = inputResult.rows.map(input => {
+    const stateAsset = Array.isArray(state.assets) ? state.assets.find((item: any) => item.inputAssetId === input.id && item.scriptId === script.id && item.scriptVersion === script.version) : undefined;
+    return {
+      assetId: input.id,
+      sectionIndex: sectionIndexForInput(state, input.id, script.id, script.version, visuals.sections.length),
+      origin: "owner_uploaded_capture",
+      endpoint: "input",
+      source_kind: "real_capture",
+      synthetic: false,
+      sha256: input.sha256,
+      dimensions: {
+        width: Number.isInteger(stateAsset?.width) ? Number(stateAsset.width) : null,
+        height: Number.isInteger(stateAsset?.height) ? Number(stateAsset.height) : null,
+      },
+      focus: { x: 0.5, y: 0.5 },
+    };
+  });
+  const generatedCandidates = visuals.visualDirections.map(direction => ({
+    sectionIndex: direction.sectionIndex,
+    cacheKey: imageCacheKey({ visualDirection: direction.text, preset: IMAGE_GENERATION_POLICY.preset, width: dimensions.width, height: dimensions.height }),
+  }));
+  if (generatedCandidates.length) {
+    const generatedResult = await pool.query<{ cache_key: string; content_sha256: string; width: number; height: number }>(
+      `SELECT c.cache_key, c.content_sha256, c.width, c.height
+         FROM studio_image_cache c
+        WHERE c.cache_key = ANY($1::text[])
+          AND EXISTS (
+            SELECT 1 FROM studio_image_usage u
+             WHERE u.cache_key = c.cache_key AND u.video_id = $2 AND u.status = 'success'
+          )`,
+      [generatedCandidates.map(item => item.cacheKey), job.video_id],
+    );
+    const generatedByKey = new Map(generatedResult.rows.map(row => [row.cache_key.trim(), row]));
+    for (const candidate of generatedCandidates) {
+      const row = generatedByKey.get(candidate.cacheKey);
+      if (!row) continue;
+      visualAssets.push({
+        assetId: candidate.cacheKey,
+        sectionIndex: candidate.sectionIndex,
+        origin: "studio_image_cache",
+        endpoint: "image",
+        source_kind: "generated_image",
+        synthetic: true,
+        sha256: row.content_sha256.trim(),
+        dimensions: { width: Number(row.width), height: Number(row.height) },
+        focus: { x: 0.5, y: 0.5 },
+      });
+    }
+  }
   const manifest: RenderManifest = {
     jobId: job.id, videoId: job.video_id, scriptId: job.script_id, scriptVersion: job.script_version,
     title: idea.title, format: idea.format, cues: visuals.cues, ttsChunks, codeBlocks: visuals.codeBlocks, sections: visuals.sections, visualDirections: visuals.visualDirections,
     references: (idea.captureUrls ?? []).filter((url: unknown): url is string => typeof url === "string" && /^https:\/\//i.test(url)).slice(0, 10),
     voiceMode,
     inputs: inputResult.rows.map(input => ({ id: input.id, fileName: input.file_name, contentType: input.content_type, sizeBytes: Number(input.file_size_bytes), sha256: input.sha256, label: input.file_name, sectionIndex: sectionIndexForInput(state, input.id, script.id, script.version, visuals.sections.length) })),
+    workerContractVersion: WORKER_CONTRACT_VERSION,
+    motionPreset: "none",
+    visualAssets,
+    safeArea: { left: 0.05, right: 0.05, top: 0.05, bottom: 0.05 },
+    productionNotesExcluded: true,
     tts: { primaryModel: tts.primaryModel, fallbackModel: tts.fallbackModel, voice: tts.voice },
   };
   const body = JSON.stringify(manifest); const hash = createHash("sha256").update(body).digest("hex");
@@ -305,6 +379,30 @@ export async function getSignedRenderInput(jobId: string, inputAssetId: string) 
     WHERE j.id = $1::uuid AND i.id = $2::uuid AND j.status = ANY($3::text[]) LIMIT 1`, [jobId, inputAssetId, [...JOB_ACTIVE]]);
   const input = result.rows[0]; if (!input) throw new Error("Captura não pertence à versão aprovada deste job.");
   return { data: input.data, fileName: input.file_name, contentType: input.content_type, sha256: input.sha256, signature: signRenderRequest(input.data, requiredRenderSecret(), { method: "POST", path: RENDER_PATHS.input }) };
+}
+
+export async function getSignedRenderImage(jobId: string, cacheKey: string) {
+  if (!UUID_PATTERN.test(jobId) || !/^[a-f0-9]{64}$/i.test(cacheKey)) throw new Error("Imagem gerada inválida.");
+  const pool = requirePool();
+  const result = await pool.query<{ data: Buffer; mime_type: string; content_sha256: string }>(
+    `SELECT c.image_bytes AS data, c.mime_type, c.content_sha256
+       FROM studio_render_jobs j
+       JOIN studio_image_usage u ON u.video_id = j.video_id AND u.cache_key = $2 AND u.status = 'success'
+       JOIN studio_image_cache c ON c.cache_key = u.cache_key AND c.expires_at > NOW()
+      WHERE j.id = $1::uuid AND j.status = ANY($3::text[])
+      ORDER BY u.created_at DESC LIMIT 1`,
+    [jobId, cacheKey.toLowerCase(), [...JOB_ACTIVE]],
+  );
+  const image = result.rows[0];
+  if (!image) throw new Error("Imagem gerada não pertence à versão ativa deste job.");
+  const extension = image.mime_type === "image/jpeg" ? "jpg" : image.mime_type === "image/webp" ? "webp" : "png";
+  return {
+    data: image.data,
+    fileName: `generated-${cacheKey.toLowerCase()}.${extension}`,
+    contentType: image.mime_type,
+    sha256: image.content_sha256.trim(),
+    signature: signRenderRequest(image.data, requiredRenderSecret(), { method: "POST", path: RENDER_PATHS.image }),
+  };
 }
 
 export async function synthesizeRenderChunk(jobId: string, chunkIndex: number) {
@@ -347,6 +445,7 @@ export type RenderQaCheck = { label: string; passed: boolean; verified: true; no
 export type RenderCallback = {
   eventId: string; jobId: string; workflowRunId: number; status: "rendering" | "qa" | "failed"; progress: number;
   message?: string; releaseId?: number; assetId?: number; fileName?: string; fileSizeBytes?: number; durationSeconds?: number; qa?: RenderQaCheck[];
+  workerContractVersion?: number;
   errorOperation?: RenderOperation; errorCode?: RenderErrorCode; httpStatus?: number; upstreamStatus?: number;
   quotaScope?: "rpm" | "tpm" | "rpd" | "tpd" | "unknown"; quotaValue?: number; quotaMetric?: string; quotaId?: string; retryAfterMs?: number;
   providerModel?: "gemini-3.8-flash-tts" | "gemini-3.8-flash-lite-tts";
@@ -396,12 +495,16 @@ export function validateRenderCallback(input: unknown): RenderCallback {
     if (typeof value.durationSeconds !== "number" || !Number.isFinite(value.durationSeconds) || value.durationSeconds <= 0) throw new Error("Campo durationSeconds ausente ou inválido no callback de QA.");
     if (typeof value.fileName !== "string" || !/^[a-zA-Z0-9._-]{1,180}\.mp4$/.test(value.fileName)) throw new Error("Nome de MP4 inválido.");
     if (!Array.isArray(value.qa) || value.qa.length < REQUIRED_QA_LABELS.length || value.qa.length > 20) throw new Error("O callback não trouxe todos os checks verificáveis de QA.");
+    const workerContractVersion = value.workerContractVersion === undefined ? 1 : value.workerContractVersion;
+    if (!Number.isInteger(workerContractVersion) || ![1, 2].includes(Number(workerContractVersion))) throw new Error("Versão de contrato do worker inválida.");
+    callback.workerContractVersion = Number(workerContractVersion);
     const labels = new Set<string>();
     callback.qa = value.qa.map((item: any) => {
       if (!item || typeof item.label !== "string" || typeof item.passed !== "boolean" || item.verified !== true || typeof item.note !== "string") throw new Error("Check de QA inválido ou não verificado.");
       labels.add(item.label); return { label: item.label.slice(0, 160), passed: item.passed, verified: true, note: item.note.slice(0, 500) };
     });
-    if (REQUIRED_QA_LABELS.some(label => !labels.has(label))) throw new Error("Faltam verificações obrigatórias de áudio, vídeo, legendas, duração ou tamanho.");
+    const requiredQaLabels = callback.workerContractVersion >= 2 ? [...REQUIRED_QA_LABELS, "visual_layout", "production_notes_excluded"] : REQUIRED_QA_LABELS;
+    if (requiredQaLabels.some(label => !labels.has(label))) throw new Error("Faltam verificações obrigatórias de áudio, vídeo, legendas, layout visual, exclusão de notas, duração ou tamanho.");
     callback.releaseId = Number(value.releaseId); callback.assetId = Number(value.assetId); callback.fileSizeBytes = Number(value.fileSizeBytes); callback.durationSeconds = Number(value.durationSeconds); callback.fileName = value.fileName;
     if (callback.releaseId < 1 || callback.assetId < 1 || callback.fileSizeBytes < 1 || callback.fileSizeBytes > 2_000_000_000 || callback.durationSeconds <= 0 || callback.durationSeconds > 7_200) throw new Error("Metadados do MP4 fora dos limites permitidos.");
   }
