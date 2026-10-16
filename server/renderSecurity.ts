@@ -5,6 +5,7 @@ export const RENDER_PATHS = {
   manifest: "/api/render?op=manifest",
   voice: "/api/render?op=voice",
   input: "/api/render?op=input",
+  image: "/api/render?op=image",
   callback: "/api/render?op=callback",
 } as const;
 const SIGNATURE_PATTERN = /^t=(\d{10}),v1=([a-f0-9]{64})$/;

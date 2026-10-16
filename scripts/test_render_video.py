@@ -259,10 +259,10 @@ class RenderWorkerTests(unittest.TestCase):
             "codeBlocks": [],
         }
         self.assertEqual(worker.validate_visual_directions(manifest), manifest["visualDirections"])
-        self.assertEqual(worker.cue_section_index(manifest, manifest["cues"][0]), 1)
+        self.assertEqual(worker.cue_section_index(manifest, manifest["cues"][0]), 0)
         self.assertEqual(worker.validate_visual_directions({"sections": ["Legado"]}), [])
         section_image = Image.new("RGB", (8, 8), (30, 20, 10))
-        capture = [{"image": section_image, "sectionIndex": 1}]
+        capture = [{"image": section_image, "sectionIndex": 0}]
         self.assertIs(worker.select_capture_for_cue(manifest, manifest["cues"][0], 0, capture), section_image)
 
         invalid = {**manifest, "visualDirections": [{"sectionIndex": 2, "section": "Demonstração", "text": "fora do limite"}]}
@@ -275,6 +275,42 @@ class RenderWorkerTests(unittest.TestCase):
             worker.make_slide(with_direction, manifest, manifest["cues"][0], 0, (1080, 1920), None)
             worker.make_slide(without_direction, {**manifest, "visualDirections": []}, manifest["cues"][0], 0, (1080, 1920), None)
             self.assertEqual(with_direction.read_bytes(), without_direction.read_bytes())
+
+    def test_worker_v2_validates_safe_visual_descriptors_and_rejects_prompt_fields(self):
+        manifest = {
+            "workerContractVersion": 2,
+            "productionNotesExcluded": True,
+            "motionPreset": "none",
+            "safeArea": {"left": 0.05, "right": 0.05, "top": 0.05, "bottom": 0.05},
+            "sections": ["A"],
+            "visualAssets": [{"assetId": "a" * 64, "sectionIndex": 0, "origin": "studio_image_cache", "endpoint": "image", "source_kind": "generated_image", "synthetic": True, "sha256": "b" * 64, "dimensions": {"width": 1280, "height": 720}, "focus": {"x": 0.5, "y": 0.5}}],
+        }
+        self.assertIsNone(worker.validate_worker_contract(manifest))
+        invalid = {**manifest, "visualAssets": [{**manifest["visualAssets"][0], "prompt": "não pode entrar"}]}
+        with self.assertRaises(worker.RenderError):
+            worker.validate_worker_contract(invalid)
+
+    def test_ken_burns_is_deterministic_and_bounded(self):
+        from PIL import Image
+        image = Image.new("RGB", (1000, 700), (30, 90, 120))
+        first = worker.apply_ken_burns(image, 0.0)
+        last = worker.apply_ken_burns(image, 1.0)
+        repeat = worker.apply_ken_burns(image, 1.0)
+        self.assertEqual(first.size, (1000, 700))
+        self.assertEqual(last.size, (943, 660))
+        self.assertEqual(last.tobytes(), repeat.tobytes())
+
+    def test_qa_v2_reports_fps_layout_and_production_note_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / "final.mp4"
+            captions = Path(directory) / "captions.srt"
+            video.write_bytes(b"x" * 20_000)
+            captions.write_text("1\n00:00:00,000 --> 00:00:02,000\nOlá\n", encoding="utf-8")
+            manifest = {"workerContractVersion": 2, "productionNotesExcluded": True, "motionPreset": "none", "safeArea": {"left": 0.05, "right": 0.05, "top": 0.05, "bottom": 0.05}, "sections": [], "visualAssets": [], "format": "Short", "cues": [{"text": "Olá"}]}
+            streams = [{"codec_type": "video", "codec_name": "h264", "width": 1080, "height": 1920, "pix_fmt": "yuv420p", "r_frame_rate": "30/1"}, {"codec_type": "audio", "codec_name": "aac"}]
+            checks, _, _ = worker.qa_result(video, captions, {"streams": streams, "format": {"duration": "15.2"}}, manifest)
+            self.assertEqual({check["label"] for check in checks}, {"video_stream", "audio_stream", "captions", "duration", "file_size", "visual_layout", "production_notes_excluded"})
+            self.assertTrue(all(check["passed"] for check in checks), checks)
 
     def test_slide_is_rendered_at_target_dimensions(self):
         from PIL import Image

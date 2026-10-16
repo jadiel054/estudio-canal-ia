@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { processRenderCallback, verifyOutputRelease, type RenderCallback } from "./renderPipeline";
+import { processRenderCallback, validateRenderCallback, verifyOutputRelease, type RenderCallback } from "./renderPipeline";
 import {
   callbackStageDiagnostic,
   classifyRenderFailure,
@@ -115,6 +115,20 @@ const releaseVerificationCases: Array<[string, Array<Response | Error>, RenderCa
 ];
 
 describe("etapas seguras do callback de render", () => {
+  it("exige visual_layout e production_notes_excluded quando o worker declara contrato v2", () => {
+    expect(() => validateRenderCallback({ ...qaCallback, workerContractVersion: 2 })).toThrow("Faltam verificações obrigatórias");
+    const accepted = validateRenderCallback({
+      ...qaCallback,
+      workerContractVersion: 2,
+      qa: [
+        ...qaCallback.qa,
+        { label: "visual_layout", passed: true, verified: true, note: "verificado" },
+        { label: "production_notes_excluded", passed: true, verified: true, note: "verificado" },
+      ],
+    });
+    expect(accepted.workerContractVersion).toBe(2);
+  });
+
   it("classifica payload inválido sem preservar mensagem, corpo ou segredo", async () => {
     await expectStage(processRenderCallback({ message: "roteiro privado" }), "validacao_payload", "callback_payload_invalid");
     const failure = new RenderCallbackStageError("validacao_payload");
