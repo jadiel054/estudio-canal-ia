@@ -33,6 +33,28 @@ describe("validação do estado do estúdio", () => {
     expect(() => parseStudioState(state)).toThrow(/sectionIndex/);
   });
 
+  it("preserva diagnostics tipados do lint no QA persistido", () => {
+    const state: any = validState();
+    const diagnostic = { code: "script_unlabeled_paragraph", severity: "error", sectionIndex: 0, section: "Gancho", lineStart: 2, lineEnd: 2, message: "Rotule o parágrafo antes de aprovar.", excerpt: "Texto sem marcador." };
+    state.scripts[0].qa = {
+      status: "revisar", estimatedDurationMinutes: 0.5, technicalFlags: [], repetitionFlags: [], policyTerms: [],
+      originality: { demoRequired: true, demoSpecified: false, evidence: "Não especificado.", genericContentRisk: "alto" },
+      summary: "Corrija o lint.", classifier: "heuristic", lintDiagnostics: [diagnostic],
+    };
+    expect(parseStudioState(state).scripts[0].qa.lintDiagnostics).toEqual([diagnostic]);
+  });
+
+  it("rejeita QA com mais diagnostics que o teto seguro do parser", () => {
+    const state: any = validState();
+    const diagnostic = { code: "script_lint_info", severity: "info", sectionIndex: 0, section: "Gancho", lineStart: 1, lineEnd: 1, message: "Informação." };
+    state.scripts[0].qa = {
+      status: "revisar", estimatedDurationMinutes: 0.5, technicalFlags: [], repetitionFlags: [], policyTerms: [],
+      originality: { demoRequired: true, demoSpecified: false, evidence: "Não especificado.", genericContentRisk: "alto" },
+      summary: "Revisar.", classifier: "heuristic", lintDiagnostics: Array.from({ length: 201 }, () => diagnostic),
+    };
+    expect(() => parseStudioState(state)).toThrow(/lintDiagnostics/);
+  });
+
   it("rejeita estágio editorial desconhecido em vez de gravar qualquer coisa", () => {
     const state = validState();
     state.ideas[0].status = "qualquer_coisa";

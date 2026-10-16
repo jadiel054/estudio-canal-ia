@@ -50,6 +50,17 @@ export type Idea = ExampleFlag & {
   createdAt: string;
 };
 
+export type ScriptLintDiagnostic = {
+  code: string;
+  severity: "error" | "warning" | "info";
+  sectionIndex: number;
+  section: string;
+  lineStart: number;
+  lineEnd: number;
+  message: string;
+  excerpt?: string;
+};
+
 export type Script = ExampleFlag & {
   id: string;
   ideaId: string;
@@ -67,6 +78,7 @@ export type Script = ExampleFlag & {
     originality: { demoRequired: true; demoSpecified: boolean; evidence: string; genericContentRisk: "baixo" | "médio" | "alto" };
     summary: string;
     classifier: "llm" | "heuristic";
+    lintDiagnostics?: ScriptLintDiagnostic[];
   };
 };
 

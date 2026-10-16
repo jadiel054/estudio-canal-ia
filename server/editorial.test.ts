@@ -61,6 +61,19 @@ describe("editorial commands", () => {
     expect(mocked.saveStudioState).toHaveBeenCalledTimes(1);
   });
 
+  it("bloqueia Portão 1 se um roteiro marcado contiver parágrafo solto, mesmo com QA persistido", async () => {
+    mocked.state.scripts[0].content = "Texto solto não rotulado.\n\n**Áudio (Narração):** Fala válida.";
+    await expect(executeEditorialCommand({ operation: "approveScript", ideaId: "idea-1" })).rejects.toThrow("script_unlabeled_paragraph");
+    expect(mocked.saveStudioState).not.toHaveBeenCalled();
+  });
+
+  it("permite Portão 1 com warning de Nota não acionável quando não há errors", async () => {
+    mocked.state.scripts[0].content = "# Gancho\n**Nota de produção:** lembrar de revisar a captura.\n**Visual:** Mostrar o terminal.\n**Áudio (Narração):** Fala válida.";
+    const result: any = await executeEditorialCommand({ operation: "approveScript", ideaId: "idea-1" });
+    expect(result.ideas[0].status).toBe("assets");
+    expect(mocked.saveStudioState).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects final approval when QA is absent or the video is in the wrong stage", async () => {
     mocked.state.ideas[0].status = "aguarda_aprov_video";
     mocked.state.scripts[0].status = "Aprovado";
@@ -133,6 +146,14 @@ describe("Etapa A · render simulado", () => {
     expect(result.renderJobs[0].status).toBe("simulado");
     expect(result.renderJobs[0].simulated).toBe(true);
     expect(result.audit[0].action).toBe("Render simulado concluído");
+  });
+
+  it("não cria vídeo/job se o roteiro marcado tiver somente Visual e Nota", async () => {
+    mocked.state.scripts[0].content = "# Gancho\n**Visual:** Abrir com a interface.\n**Nota de produção:** preparar captura.";
+    await expect(executeEditorialCommand({ operation: "startRender", ideaId: "idea-1" })).rejects.toThrow("script_no_audio_cues");
+    expect(mocked.state.videos).toEqual([]);
+    expect(mocked.state.renderJobs).toEqual([]);
+    expect(mocked.saveStudioState).not.toHaveBeenCalled();
   });
 
   it("bloqueia o Portão 2 e a agenda em vídeo simulado fora do modo demonstração", async () => {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_SCRIPT_LINT_DIAGNOSTICS } from "./renderManifest";
 
 /**
  * Validação do estado do estúdio recebido do cliente.
@@ -17,6 +18,16 @@ const STAGES = [
 
 const shortText = (max: number) => z.string().max(max);
 const id = z.string().min(1).max(120);
+const scriptLintDiagnosticSchema = z.object({
+  code: z.string().regex(/^[a-z0-9_]{1,80}$/),
+  severity: z.enum(["error", "warning", "info"]),
+  sectionIndex: z.number().int().min(0).max(100_000),
+  section: shortText(100),
+  lineStart: z.number().int().positive().max(100_001),
+  lineEnd: z.number().int().positive().max(100_001),
+  message: shortText(600),
+  excerpt: shortText(120).optional(),
+});
 
 export const stageSchema = z.enum(STAGES);
 
@@ -67,6 +78,7 @@ export const scriptSchema = z.object({
     originality: z.object({ demoRequired: z.literal(true), demoSpecified: z.boolean(), evidence: shortText(300), genericContentRisk: z.enum(["baixo", "médio", "alto"]) }),
     summary: shortText(500),
     classifier: z.enum(["llm", "heuristic"]),
+    lintDiagnostics: z.array(scriptLintDiagnosticSchema).max(MAX_SCRIPT_LINT_DIAGNOSTICS).optional(),
   }).optional(),
   example: z.boolean().optional(),
 });

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { canStartRender } from "@shared/workflowPolicy";
 import { RENDER_PATHS, signRenderRequest } from "./renderSecurity";
-import { buildNarrationChunks, extractScriptVisuals } from "./renderManifest";
+import { assertScriptRenderable, buildNarrationChunks, extractScriptVisuals } from "./renderManifest";
 import { getStudioPool, getStudioState, stateVersion } from "./studioRepository";
 import { generateSpeechCached, getTtsSettings, MAX_TTS_ATTEMPTS_PER_MODEL, TTS_NARRATION_STYLE } from "./ttsProvider";
 import { getCachedTtsKeys, ttsAudioCacheKey } from "./ttsCache";
@@ -158,6 +158,7 @@ export async function startRenderPipeline(ideaId: string) {
       if (!idea || !script) throw new Error("Pauta real ou roteiro não encontrado; itens de demonstração não podem iniciar produção.");
       const gate = canStartRender(idea.status, script.status);
       if (!gate.allowed || script.status !== "Aprovado" || !script.qa) throw new Error(gate.allowed ? "O roteiro precisa ter QA persistido e aprovação do Portão 1." : gate.reason);
+      assertScriptRenderable(script.content);
 
       failureStage = "active_job_check";
       const active = await connection.query("SELECT id FROM studio_render_jobs WHERE script_id = $1 AND script_version = $2 AND status = ANY($3::text[]) LIMIT 1 FOR UPDATE", [script.id, script.version, [...JOB_ACTIVE]]);
@@ -277,7 +278,7 @@ export async function getSignedRenderManifest(jobId: string) {
   const stateResult = await pool.query<{ value: any }>("SELECT value FROM app_settings WHERE key = 'studio_state' LIMIT 1");
   const state = stateResult.rows[0]?.value; const script = state?.scripts?.find((item: any) => item.id === job.script_id && !item.example); const idea = state?.ideas?.find((item: any) => item.id === job.idea_id && !item.example);
   if (!script || !idea || script.status !== "Aprovado" || script.version !== job.script_version || !script.qa) throw new Error("A aprovação do Portão 1 ou a versão do roteiro mudou; o manifesto foi bloqueado.");
-  const visuals = extractScriptVisuals(script.content); const tts = await getTtsSettings();
+  const visuals = assertScriptRenderable(script.content); const tts = await getTtsSettings();
   const inputResult = await pool.query<{ id: string; file_name: string; content_type: string; file_size_bytes: number; sha256: string }>("SELECT id::text, file_name, content_type, file_size_bytes, sha256 FROM studio_render_inputs WHERE script_id = $1 AND script_version = $2 ORDER BY created_at ASC LIMIT 5", [script.id, script.version]);
   const voiceMode = state.settings?.voiceMode === "Música + texto" ? "Música + texto" : "TTS";
   const ttsChunks = voiceMode === "TTS" ? buildNarrationChunks(visuals.cues) : [];
