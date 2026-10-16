@@ -15,6 +15,50 @@ const JOB_ACTIVE = ["queued", "rendering", "qa"] as const;
 const REQUIRED_QA_LABELS = ["video_stream", "audio_stream", "captions", "duration", "file_size"];
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+export const START_RENDER_LOG_STAGES = [
+  "entry", "neon_connection_wait_started", "neon_connection_acquired",
+  "transaction_begin_started", "transaction_begin_completed",
+  "studio_state_lock_wait_started", "studio_state_lock_acquired",
+  "job_persist_started", "job_persist_completed", "commit_started", "commit_completed",
+  "dispatch_started", "dispatch_response", "dispatch_failure_persist_started",
+  "dispatch_failure_persist_returned", "failure",
+] as const;
+type StartRenderLogStage = typeof START_RENDER_LOG_STAGES[number];
+type StartRenderFailureStage = "configuration" | "neon_pool" | "neon_connection" | "transaction_begin" | "studio_state_lock" | "validation" | "active_job_check" | "job_persist" | "commit" | "dispatch" | "dispatch_failure_persist";
+type StartRenderFailureKind = "configuration_error" | "database_error" | "validation_error" | "dispatch_http_error" | "dispatch_network_error" | "dispatch_failure_persist_error";
+type StartRenderLogFields = {
+  durationMs?: number;
+  outcome?: "success" | "http_error" | "network_error";
+  httpStatus?: number;
+  failureStage?: StartRenderFailureStage;
+  failureKind?: StartRenderFailureKind;
+};
+
+function logStartRender(attemptId: string, startedAt: number, stage: StartRenderLogStage, fields: StartRenderLogFields = {}) {
+  const now = Date.now();
+  const record: Record<string, string | number> = {
+    event: "studio_start_render_timing",
+    attemptId,
+    stage,
+    timestamp: new Date(now).toISOString(),
+    elapsedMs: Math.max(0, now - startedAt),
+  };
+  if (Number.isFinite(fields.durationMs) && fields.durationMs! >= 0) record.durationMs = Math.round(fields.durationMs!);
+  if (fields.outcome && ["success", "http_error", "network_error"].includes(fields.outcome)) record.outcome = fields.outcome;
+  if (Number.isInteger(fields.httpStatus) && fields.httpStatus! >= 100 && fields.httpStatus! <= 599) record.httpStatus = fields.httpStatus!;
+  if (fields.failureStage) record.failureStage = fields.failureStage;
+  if (fields.failureKind) record.failureKind = fields.failureKind;
+  try { console.info(JSON.stringify(record)); } catch { /* Telemetria não deve alterar o fluxo do render. */ }
+}
+
+function startRenderFailureKind(stage: StartRenderFailureStage): StartRenderFailureKind {
+  if (stage === "configuration" || stage === "neon_pool") return "configuration_error";
+  if (stage === "validation") return "validation_error";
+  if (stage === "dispatch") return "dispatch_network_error";
+  if (stage === "dispatch_failure_persist") return "dispatch_failure_persist_error";
+  return "database_error";
+}
+
 function requiredRenderSecret() {
   const value = process.env.STUDIO_RENDER_HMAC_SECRET;
   if (!value || value.length < 32) throw new Error("Configure STUDIO_RENDER_HMAC_SECRET (mínimo 32 caracteres) no Vercel e em Actions Secrets.");
@@ -76,42 +120,106 @@ export async function testGitHubActionsConnection(fetcher: typeof fetch = fetch)
 }
 
 export async function startRenderPipeline(ideaId: string) {
-  requiredActionsToken(); requiredRenderSecret();
-  const pool = requirePool(); const connection = await pool.connect();
-  let jobId = ""; let stateToReturn: any;
+  const attemptId = randomUUID(); const startedAt = Date.now();
+  let failureStage: StartRenderFailureStage = "configuration"; let failureLogged = false;
+  const logFailure = (stage: StartRenderFailureStage, kind = startRenderFailureKind(stage), httpStatus?: number) => {
+    logStartRender(attemptId, startedAt, "failure", { failureStage: stage, failureKind: kind, httpStatus });
+    failureLogged = true;
+  };
+  logStartRender(attemptId, startedAt, "entry");
   try {
-    await connection.query("BEGIN");
-    const result = await connection.query<{ value: any }>("SELECT value FROM app_settings WHERE key = 'studio_state' FOR UPDATE");
-    const state = result.rows[0]?.value;
-    if (!state) throw new Error("Importe o estado do estúdio para o Neon antes de iniciar um render real.");
-    if (!["TTS", "Música + texto"].includes(state.settings?.voiceMode)) throw new Error("O modo 'Sua voz' ainda não está habilitado. Selecione TTS ou Música + texto em Configurações.");
-    const idea = state.ideas?.find((item: any) => item.id === ideaId && !item.example);
-    const script = state.scripts?.find((item: any) => item.ideaId === ideaId && !item.example);
-    if (!idea || !script) throw new Error("Pauta real ou roteiro não encontrado; itens de demonstração não podem iniciar produção.");
-    const gate = canStartRender(idea.status, script.status);
-    if (!gate.allowed || script.status !== "Aprovado" || !script.qa) throw new Error(gate.allowed ? "O roteiro precisa ter QA persistido e aprovação do Portão 1." : gate.reason);
-    const active = await connection.query("SELECT id FROM studio_render_jobs WHERE script_id = $1 AND script_version = $2 AND status = ANY($3::text[]) LIMIT 1 FOR UPDATE", [script.id, script.version, [...JOB_ACTIVE]]);
-    if (active.rowCount) throw new Error("Já existe um job ativo para esta versão aprovada do roteiro.");
+    requiredActionsToken(); requiredRenderSecret();
+    failureStage = "neon_pool";
+    const pool = requirePool();
+    failureStage = "neon_connection";
+    logStartRender(attemptId, startedAt, "neon_connection_wait_started");
+    const connectionStartedAt = Date.now();
+    const connection = await pool.connect();
+    logStartRender(attemptId, startedAt, "neon_connection_acquired", { durationMs: Date.now() - connectionStartedAt });
+    let jobId = ""; let stateToReturn: any;
+    try {
+      failureStage = "transaction_begin";
+      logStartRender(attemptId, startedAt, "transaction_begin_started");
+      const beginStartedAt = Date.now();
+      await connection.query("BEGIN");
+      logStartRender(attemptId, startedAt, "transaction_begin_completed", { durationMs: Date.now() - beginStartedAt });
 
-    const now = new Date().toISOString(); const videoId = randomUUID(); jobId = randomUUID();
-    const video = { id: videoId, ideaId: idea.id, scriptId: script.id, title: idea.title, format: idea.format, stage: "render", duration: "A calcular", synthetic: false, simulated: false, renderJobId: jobId, qa: [] };
-    state.videos = [video, ...(state.videos ?? []).filter((item: any) => item.ideaId !== ideaId || item.example)];
-    idea.status = "render";
-    const renderJob = { id: jobId, videoId, status: "queued", attempts: 1, progress: 0, startedAt: now, simulated: false };
-    state.renderJobs = [renderJob, ...(state.renderJobs ?? []).filter((item: any) => item.videoId !== videoId)];
-    state.audit = [{ id: randomUUID(), actor: "Você", action: "Render real solicitado", target: idea.title, at: now, detail: `Roteiro v${script.version} aprovado; aguardando GitHub Actions` }, ...(state.audit ?? [])].slice(0, 500);
-    const oldVersion = stateVersion(state); state.version = oldVersion + 1;
-    await connection.query("INSERT INTO studio_render_jobs (id, video_id, idea_id, script_id, script_version, status, attempts, progress, created_at, updated_at) VALUES ($1::uuid, $2, $3, $4, $5, 'queued', 1, 0, NOW(), NOW())", [jobId, videoId, ideaId, script.id, script.version]);
-    const saved = await connection.query("UPDATE app_settings SET value = $1::jsonb, updated_at = NOW() WHERE key = 'studio_state' AND COALESCE((value->>'version')::int, 0) = $2", [JSON.stringify(state), oldVersion]);
-    if (saved.rowCount !== 1) throw new Error("O estado mudou durante a criação do job; atualize e tente novamente.");
-    await connection.query("INSERT INTO audit_log (actor, action, target, details) VALUES ('Você', 'Render real solicitado', $1, $2::jsonb)", [idea.title, JSON.stringify({ jobId, scriptId: script.id, scriptVersion: script.version })]);
-    await connection.query("COMMIT"); stateToReturn = state;
-  } catch (error) { await connection.query("ROLLBACK"); throw error; }
-  finally { connection.release(); }
+      failureStage = "studio_state_lock";
+      logStartRender(attemptId, startedAt, "studio_state_lock_wait_started");
+      const lockStartedAt = Date.now();
+      const result = await connection.query<{ value: any }>("SELECT value FROM app_settings WHERE key = 'studio_state' FOR UPDATE");
+      logStartRender(attemptId, startedAt, "studio_state_lock_acquired", { durationMs: Date.now() - lockStartedAt });
+      const state = result.rows[0]?.value;
+      failureStage = "validation";
+      if (!state) throw new Error("Importe o estado do estúdio para o Neon antes de iniciar um render real.");
+      if (!["TTS", "Música + texto"].includes(state.settings?.voiceMode)) throw new Error("O modo 'Sua voz' ainda não está habilitado. Selecione TTS ou Música + texto em Configurações.");
+      const idea = state.ideas?.find((item: any) => item.id === ideaId && !item.example);
+      const script = state.scripts?.find((item: any) => item.ideaId === ideaId && !item.example);
+      if (!idea || !script) throw new Error("Pauta real ou roteiro não encontrado; itens de demonstração não podem iniciar produção.");
+      const gate = canStartRender(idea.status, script.status);
+      if (!gate.allowed || script.status !== "Aprovado" || !script.qa) throw new Error(gate.allowed ? "O roteiro precisa ter QA persistido e aprovação do Portão 1." : gate.reason);
 
-  try { await dispatchRenderWorkflow(jobId); }
-  catch (error) { await markRenderDispatchFailure(jobId, error instanceof Error ? error.message : "Falha ao despachar o workflow."); throw error; }
-  return stateToReturn;
+      failureStage = "active_job_check";
+      const active = await connection.query("SELECT id FROM studio_render_jobs WHERE script_id = $1 AND script_version = $2 AND status = ANY($3::text[]) LIMIT 1 FOR UPDATE", [script.id, script.version, [...JOB_ACTIVE]]);
+      if (active.rowCount) throw new Error("Já existe um job ativo para esta versão aprovada do roteiro.");
+
+      failureStage = "job_persist";
+      logStartRender(attemptId, startedAt, "job_persist_started");
+      const persistStartedAt = Date.now();
+      const now = new Date().toISOString(); const videoId = randomUUID(); jobId = randomUUID();
+      const video = { id: videoId, ideaId: idea.id, scriptId: script.id, title: idea.title, format: idea.format, stage: "render", duration: "A calcular", synthetic: false, simulated: false, renderJobId: jobId, qa: [] };
+      state.videos = [video, ...(state.videos ?? []).filter((item: any) => item.ideaId !== ideaId || item.example)];
+      idea.status = "render";
+      const renderJob = { id: jobId, videoId, status: "queued", attempts: 1, progress: 0, startedAt: now, simulated: false };
+      state.renderJobs = [renderJob, ...(state.renderJobs ?? []).filter((item: any) => item.videoId !== videoId)];
+      state.audit = [{ id: randomUUID(), actor: "Você", action: "Render real solicitado", target: idea.title, at: now, detail: `Roteiro v${script.version} aprovado; aguardando GitHub Actions` }, ...(state.audit ?? [])].slice(0, 500);
+      const oldVersion = stateVersion(state); state.version = oldVersion + 1;
+      await connection.query("INSERT INTO studio_render_jobs (id, video_id, idea_id, script_id, script_version, status, attempts, progress, created_at, updated_at) VALUES ($1::uuid, $2, $3, $4, $5, 'queued', 1, 0, NOW(), NOW())", [jobId, videoId, ideaId, script.id, script.version]);
+      const saved = await connection.query("UPDATE app_settings SET value = $1::jsonb, updated_at = NOW() WHERE key = 'studio_state' AND COALESCE((value->>'version')::int, 0) = $2", [JSON.stringify(state), oldVersion]);
+      if (saved.rowCount !== 1) throw new Error("O estado mudou durante a criação do job; atualize e tente novamente.");
+      await connection.query("INSERT INTO audit_log (actor, action, target, details) VALUES ('Você', 'Render real solicitado', $1, $2::jsonb)", [idea.title, JSON.stringify({ jobId, scriptId: script.id, scriptVersion: script.version })]);
+      logStartRender(attemptId, startedAt, "job_persist_completed", { durationMs: Date.now() - persistStartedAt });
+
+      failureStage = "commit";
+      logStartRender(attemptId, startedAt, "commit_started");
+      const commitStartedAt = Date.now();
+      await connection.query("COMMIT");
+      logStartRender(attemptId, startedAt, "commit_completed", { durationMs: Date.now() - commitStartedAt });
+      stateToReturn = state;
+    } catch (error) {
+      logFailure(failureStage);
+      await connection.query("ROLLBACK");
+      throw error;
+    } finally { connection.release(); }
+
+    failureStage = "dispatch";
+    logStartRender(attemptId, startedAt, "dispatch_started");
+    const dispatchStartedAt = Date.now();
+    let dispatchStatus: number | null = null;
+    try {
+      dispatchStatus = await dispatchRenderWorkflow(jobId);
+      logStartRender(attemptId, startedAt, "dispatch_response", { durationMs: Date.now() - dispatchStartedAt, outcome: dispatchStatus === 204 ? "success" : "http_error", httpStatus: dispatchStatus });
+      if (dispatchStatus !== 204) throw new Error(`GitHub Actions recusou o dispatch (HTTP ${dispatchStatus}). Verifique Actions: write no PAT e se ${WORKFLOW_FILE} está na branch main.`);
+    } catch (error) {
+      if (dispatchStatus === null) logStartRender(attemptId, startedAt, "dispatch_response", { durationMs: Date.now() - dispatchStartedAt, outcome: "network_error" });
+      logFailure("dispatch", dispatchStatus === null ? "dispatch_network_error" : "dispatch_http_error", dispatchStatus ?? undefined);
+      failureStage = "dispatch_failure_persist";
+      logStartRender(attemptId, startedAt, "dispatch_failure_persist_started");
+      const failurePersistStartedAt = Date.now();
+      try {
+        await markRenderDispatchFailure(jobId, error instanceof Error ? error.message : "Falha ao despachar o workflow.");
+      } catch (persistError) {
+        logFailure("dispatch_failure_persist", "dispatch_failure_persist_error");
+        throw persistError;
+      }
+      logStartRender(attemptId, startedAt, "dispatch_failure_persist_returned", { durationMs: Date.now() - failurePersistStartedAt });
+      throw error;
+    }
+    return stateToReturn;
+  } catch (error) {
+    if (!failureLogged) logFailure(failureStage);
+    throw error;
+  }
 }
 
 async function dispatchRenderWorkflow(jobId: string) {
@@ -120,7 +228,7 @@ async function dispatchRenderWorkflow(jobId: string) {
     headers: { authorization: `Bearer ${requiredActionsToken()}`, accept: "application/vnd.github+json", "content-type": "application/json", "x-github-api-version": "2022-11-28" },
     body: JSON.stringify({ ref: "main", inputs: { jobId } }), signal: AbortSignal.timeout(15_000),
   });
-  if (response.status !== 204) throw new Error(`GitHub Actions recusou o dispatch (HTTP ${response.status}). Verifique Actions: write no PAT e se ${WORKFLOW_FILE} está na branch main.`);
+  return response.status;
 }
 
 async function markRenderDispatchFailure(jobId: string, message: string) {
