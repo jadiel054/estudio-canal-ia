@@ -4,10 +4,7 @@
   "buildCommand": "pnpm run build",
   "installCommand": "pnpm install --frozen-lockfile",
   "outputDirectory": "public",
-  "functions": {
-    "api/**/*.js": { "maxDuration": 50 },
-    "api/integrations/[...path].js": { "maxDuration": 50 }
-  },
+  "functions": { "api/**/*.js": { "maxDuration": 50 } },
   "crons": [{ "path": "/api/cron/radar", "schedule": "0 8 * * *" }],
   "rewrites": [
     {
