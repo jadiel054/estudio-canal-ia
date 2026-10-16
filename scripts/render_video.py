@@ -424,12 +424,32 @@ def callback(manifest: dict, status: str, progress: int, *, message: str | None 
         raise RenderError("O Estúdio não confirmou o callback do job.", operation="callback", error_code="callback_not_confirmed")
     return response
 
+def validate_visual_directions(manifest: dict):
+    directions = manifest.get("visualDirections", [])
+    sections = manifest.get("sections", [])
+    if not isinstance(directions, list) or len(directions) > 80 or not isinstance(sections, list):
+        raise RenderError("Direções visuais inválidas no manifesto.", operation="manifest", error_code="manifest_invalid")
+    for direction in directions:
+        if not isinstance(direction, dict):
+            raise RenderError("Direção visual inválida no manifesto.", operation="manifest", error_code="manifest_invalid")
+        section_index = direction.get("sectionIndex")
+        section = direction.get("section")
+        text = direction.get("text")
+        if (not isinstance(section_index, int) or isinstance(section_index, bool)
+                or section_index < 0 or section_index >= len(sections)
+                or not isinstance(section, str) or section != sections[section_index]
+                or not isinstance(text, str) or not text.strip() or len(text) > 2_000):
+            raise RenderError("Mapeamento da direção visual para seção inválido.", operation="manifest", error_code="manifest_invalid")
+    return directions
+
 def fetch_manifest() -> dict:
     body = compact_json({"jobId": JOB_ID})
     response, _ = post_studio("/api/render?op=manifest", body, verify_signature=True)
     manifest = response
     if manifest.get("jobId") != JOB_ID or not manifest.get("cues") or len(manifest["cues"]) > 80:
         raise RenderError("O manifesto não corresponde ao job ou não contém cues válidos.", operation="manifest", error_code="manifest_invalid")
+    if "visualDirections" in manifest:
+        validate_visual_directions(manifest)
     if manifest.get("voiceMode") == "TTS":
         validate_tts_chunks(manifest)
     return manifest
@@ -496,11 +516,17 @@ def fetch_inputs(manifest: dict, directory: Path) -> list[dict]:
     return captures
 
 def cue_section_index(manifest: dict, cue: dict) -> int | None:
-    section_index = cue.get("sectionIndex")
     sections = manifest.get("sections", [])
+    section = cue.get("section")
+    for direction in manifest.get("visualDirections", []):
+        if not isinstance(direction, dict) or direction.get("section") != section:
+            continue
+        visual_index = direction.get("sectionIndex")
+        if isinstance(visual_index, int) and not isinstance(visual_index, bool) and 0 <= visual_index < len(sections):
+            return visual_index
+    section_index = cue.get("sectionIndex")
     if isinstance(section_index, int) and not isinstance(section_index, bool) and 0 <= section_index < len(sections):
         return section_index
-    section = cue.get("section")
     try:
         return sections.index(section)
     except (ValueError, AttributeError):

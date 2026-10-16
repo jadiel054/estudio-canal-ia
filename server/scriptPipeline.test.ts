@@ -15,7 +15,7 @@ vi.mock("./studioRepository", () => ({ getStudioState: mocked.getStudioState }))
 vi.mock("./editorial", () => ({ executeEditorialCommand: mocked.executeEditorialCommand }));
 vi.mock("./llmProviders", () => ({ completeWithFallback: mocked.completeWithFallback }));
 
-import { reviewScriptForCurrentDraft } from "./scriptPipeline";
+import { generateScriptForIdea, reviewScriptForCurrentDraft } from "./scriptPipeline";
 
 function baseState() {
   return {
@@ -57,6 +57,35 @@ describe("revisão QA do roteiro atual", () => {
     expect(result.qaProvider).toBe("gemini");
   });
 
+  it("instrui geração de roteiro a separar direção Visual de fala em blocos rotulados", async () => {
+    mocked.state.ideas[0].status = "roteiro";
+    const generatedContent = [
+      "# Gancho",
+      "**Visual:** Aproximar a tela do mapa de embeddings.",
+      "**Áudio (Narração):** Hoje vamos comparar representações vetoriais de texto.",
+      "# Demonstração",
+      "Visual: Mostrar a consulta e os resultados na interface.",
+      "Áudio (Narração): Observe como uma busca semântica encontra trechos relacionados.",
+    ].join("\n");
+    mocked.completeWithFallback
+      .mockResolvedValueOnce({ text: generatedContent, provider: "groq" })
+      .mockResolvedValueOnce({ text: JSON.stringify(validQa), provider: "gemini" });
+
+    await generateScriptForIdea("idea-1");
+
+    expect(mocked.completeWithFallback.mock.calls[0][0]).toBe("roteiro");
+    const generationPrompt = mocked.completeWithFallback.mock.calls[0][1][1].content as string;
+    expect(generationPrompt).toContain("**Visual:**");
+    expect(generationPrompt).toContain("**Áudio (Narração):**");
+    expect(generationPrompt).toContain("nunca pode ser fala, legenda ou texto de slide");
+    const qaPrompt = mocked.completeWithFallback.mock.calls[1][1][0].content as string;
+    expect(qaPrompt).toContain("não é fala e não deve entrar na duração estimada");
+    expect(mocked.executeEditorialCommand).toHaveBeenCalledWith(
+      { operation: "generateScript", ideaId: "idea-1", content: generatedContent },
+      expect.objectContaining({ qa: expect.objectContaining({ classifier: "llm" }) }),
+    );
+  });
+
   it("bloqueia itens de exemplo antes de chamar o provedor", async () => {
     mocked.state.scripts[0].example = true;
     await expect(reviewScriptForCurrentDraft("script-1", "texto" )).rejects.toThrow("itens de demonstração");
@@ -66,10 +95,12 @@ describe("revisão QA do roteiro atual", () => {
 
   it("usa QA local limitado se o provedor falhar e não descarta o texto atual", async () => {
     mocked.completeWithFallback.mockRejectedValue(new Error("indisponível"));
-    const content = "Texto longo com uma demonstração a validar; esta captura não foi executada.";
+    const longVisualNote = Array.from({ length: 100 }, () => "captura").join(" ");
+    const content = `# Demonstração\n**Visual:** ${longVisualNote}\n**Áudio (Narração):** Fala curta.`;
     const result = await reviewScriptForCurrentDraft("script-1", content);
     expect(result.qaProvider).toBe("heuristic");
     expect(result.qa.classifier).toBe("heuristic");
+    expect(result.qa.estimatedDurationMinutes).toBe(0.5);
     expect(mocked.executeEditorialCommand).toHaveBeenCalledWith(
       { operation: "updateScript", scriptId: "script-1", content },
       expect.objectContaining({ qa: expect.objectContaining({ classifier: "heuristic" }) }),
