@@ -15,6 +15,10 @@
       "source": "/api/render/preview/:jobId",
       "destination": "/api/render?delivery=preview&jobId=:jobId"
     },
+    {
+      "source": "/api/integrations/:path*",
+      "destination": "/api/integrations?__segments=:path*"
+    },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ]
 }
