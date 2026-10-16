@@ -249,6 +249,33 @@ class RenderWorkerTests(unittest.TestCase):
         montage = worker.select_capture_for_cue(manifest, manifest["cues"][2], 2, mapped_many)
         self.assertEqual(montage.size, (1200, 720))
 
+    def test_visual_direction_maps_to_section_capture_and_never_becomes_slide_text(self):
+        from PIL import Image
+        manifest = {
+            "format": "Short",
+            "sections": ["Gancho", "Demonstração"],
+            "cues": [{"index": 0, "sectionIndex": 0, "section": "Demonstração", "text": "Texto falado limpo."}],
+            "visualDirections": [{"sectionIndex": 1, "section": "Demonstração", "text": "NOTA VISUAL PRIVADA SEM NARRAÇÃO"}],
+            "codeBlocks": [],
+        }
+        self.assertEqual(worker.validate_visual_directions(manifest), manifest["visualDirections"])
+        self.assertEqual(worker.cue_section_index(manifest, manifest["cues"][0]), 1)
+        self.assertEqual(worker.validate_visual_directions({"sections": ["Legado"]}), [])
+        section_image = Image.new("RGB", (8, 8), (30, 20, 10))
+        capture = [{"image": section_image, "sectionIndex": 1}]
+        self.assertIs(worker.select_capture_for_cue(manifest, manifest["cues"][0], 0, capture), section_image)
+
+        invalid = {**manifest, "visualDirections": [{"sectionIndex": 2, "section": "Demonstração", "text": "fora do limite"}]}
+        with self.assertRaises(worker.RenderError):
+            worker.validate_visual_directions(invalid)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with_direction = Path(directory) / "with-direction.png"
+            without_direction = Path(directory) / "without-direction.png"
+            worker.make_slide(with_direction, manifest, manifest["cues"][0], 0, (1080, 1920), None)
+            worker.make_slide(without_direction, {**manifest, "visualDirections": []}, manifest["cues"][0], 0, (1080, 1920), None)
+            self.assertEqual(with_direction.read_bytes(), without_direction.read_bytes())
+
     def test_slide_is_rendered_at_target_dimensions(self):
         from PIL import Image
         with tempfile.TemporaryDirectory() as directory:

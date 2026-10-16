@@ -254,7 +254,8 @@ export type RenderManifest = {
   jobId: string; videoId: string; scriptId: string; scriptVersion: number; title: string;
   format: "Longo" | "Short" | "Live"; cues: ReturnType<typeof extractScriptVisuals>["cues"];
   ttsChunks: ReturnType<typeof buildNarrationChunks>;
-  codeBlocks: string[]; sections: string[]; references: string[]; voiceMode: "TTS" | "Música + texto";
+  codeBlocks: string[]; sections: string[]; visualDirections: ReturnType<typeof extractScriptVisuals>["visualDirections"];
+  references: string[]; voiceMode: "TTS" | "Música + texto";
   inputs: Array<{ id: string; fileName: string; contentType: string; sizeBytes: number; sha256: string; label: string; sectionIndex: number | null }>;
   tts: { primaryModel: string; fallbackModel: string; voice: string };
 };
@@ -282,7 +283,7 @@ export async function getSignedRenderManifest(jobId: string) {
   const ttsChunks = voiceMode === "TTS" ? buildNarrationChunks(visuals.cues) : [];
   const manifest: RenderManifest = {
     jobId: job.id, videoId: job.video_id, scriptId: job.script_id, scriptVersion: job.script_version,
-    title: idea.title, format: idea.format, cues: visuals.cues, ttsChunks, codeBlocks: visuals.codeBlocks, sections: visuals.sections,
+    title: idea.title, format: idea.format, cues: visuals.cues, ttsChunks, codeBlocks: visuals.codeBlocks, sections: visuals.sections, visualDirections: visuals.visualDirections,
     references: (idea.captureUrls ?? []).filter((url: unknown): url is string => typeof url === "string" && /^https:\/\//i.test(url)).slice(0, 10),
     voiceMode,
     inputs: inputResult.rows.map(input => ({ id: input.id, fileName: input.file_name, contentType: input.content_type, sizeBytes: Number(input.file_size_bytes), sha256: input.sha256, label: input.file_name, sectionIndex: sectionIndexForInput(state, input.id, script.id, script.version, visuals.sections.length) })),

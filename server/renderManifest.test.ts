@@ -8,6 +8,48 @@ describe("render manifest script extraction", () => {
     expect(result.cues.map(cue => cue.text)).toEqual(["Olá, devs!", "Vamos testar.", "Abra o terminal e rode o comando."]);
     expect(result.cues.map(cue => cue.sectionIndex)).toEqual([0, 0, 1]);
     expect(result.codeBlocks).toEqual(["const ok = true;"]);
+    expect(result.visualDirections).toEqual([]);
+  });
+
+  it("continues treating an unmarked script as legacy narration", () => {
+    const result = extractScriptVisuals("# Gancho\nUma fala de roteiro sem marcadores permanece narração.\n\n# Fecho\nOutra fala legado.");
+    expect(result.cues.map(cue => cue.text)).toEqual([
+      "Uma fala de roteiro sem marcadores permanece narração.",
+      "Outra fala legado.",
+    ]);
+    expect(result.visualDirections).toEqual([]);
+  });
+
+  it("fala somente os blocos de Áudio e associa Visual à seção sem o incluir em TTS ou captions", () => {
+    const result = extractScriptVisuals([
+      "# Gancho",
+      "**Visual:** Close-up do mapa vetorial na tela; destacar os nós relacionados.",
+      "**Áudio (Narração):** Embeddings transformam cada trecho em uma representação vetorial.",
+      "Elas permitem comparar o sentido entre textos.",
+      "",
+      "# Demonstração",
+      "Visual: Mostrar a busca semântica e o resultado encontrado.",
+      "Áudio (Narração): Agora compare a busca por palavra com a busca por significado.",
+      "```ts",
+      "const visualNoteMustNotBeSpoken = true;",
+      "```",
+    ].join("\n"));
+
+    expect(result.sections).toEqual(["Gancho", "Demonstração"]);
+    expect(result.cues.map(cue => cue.text)).toEqual([
+      "Embeddings transformam cada trecho em uma representação vetorial.",
+      "Elas permitem comparar o sentido entre textos.",
+      "Agora compare a busca por palavra com a busca por significado.",
+    ]);
+    expect(result.cues.map(cue => cue.sectionIndex)).toEqual([0, 0, 1]);
+    expect(result.visualDirections).toEqual([
+      { sectionIndex: 0, section: "Gancho", text: "Close-up do mapa vetorial na tela; destacar os nós relacionados." },
+      { sectionIndex: 1, section: "Demonstração", text: "Mostrar a busca semântica e o resultado encontrado." },
+    ]);
+    const speech = buildNarrationChunks(result.cues).map(chunk => chunk.text).join(" ");
+    expect(speech).not.toContain("Close-up");
+    expect(speech).not.toContain("Mostrar a busca semântica");
+    expect(speech).not.toContain("visualNoteMustNotBeSpoken");
   });
 
   it("rejects code-only scripts and scripts with too many cues instead of speaking code or truncating", () => {

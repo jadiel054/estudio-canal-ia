@@ -16,6 +16,7 @@ vi.mock("./renderManifest", () => ({
     ],
     codeBlocks: [],
     sections: ["A"],
+    visualDirections: [],
   }),
   buildNarrationChunks: (cues: Array<{ index: number; text: string }>) => cues.map(cue => ({ index: cue.index, cueIndices: [cue.index], text: cue.text })),
 }));
