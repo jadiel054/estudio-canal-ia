@@ -10,6 +10,8 @@ import { RENDER_PATHS, verifyRenderRequestSignature } from "./renderSecurity";
 import { getSignedRenderImage, getSignedRenderInput, getSignedRenderManifest, processRenderCallback, synthesizeRenderChunk } from "./renderPipeline";
 import { callbackStageDiagnostic, classifyRenderFailure, isRenderCallbackStageCode, isRenderOperation, renderFailureLogRecord, type RenderErrorCode, type RenderOperation } from "./renderObservability";
 import { registerRenderDeliveryRoutes } from "./renderDelivery";
+import { handleYouTubeOAuthCallback, startYouTubeOAuth, YouTubeOAuthError } from "./youtubeOAuth";
+import { readSession } from "./auth";
 
 function sendRenderFailure(res: Response, operation: RenderOperation, status: number, errorCode: RenderErrorCode, upstreamStatus?: number, detail?: ReturnType<typeof classifyRenderFailure>) {
   const safeDetail = {
@@ -92,6 +94,29 @@ export function registerApiRoutes(app: Express) {
 
   app.get("/api/platform/config.js", (_req, res) => {
     res.set("Cache-Control", "no-store").type("application/javascript").send(publicPlatformScript());
+  });
+
+  app.get("/api/integrations/youtube/start", async (req, res) => {
+    const user = await readSession(req);
+    if (!user) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const started = await startYouTubeOAuth(user.id, "default");
+      return res.redirect(302, started.url);
+    } catch {
+      return res.status(503).json({ error: "youtube_oauth_unavailable" });
+    }
+  });
+
+  app.get("/api/integrations/youtube/callback", async (req, res) => {
+    const value = (input: unknown) => Array.isArray(input) ? input[0] : typeof input === "string" ? input : undefined;
+    try {
+      await handleYouTubeOAuthCallback({ code: value(req.query.code), state: value(req.query.state), error: value(req.query.error) });
+      return res.redirect(302, "/integracoes?youtube=connected");
+    } catch (error) {
+      const code = error instanceof YouTubeOAuthError ? error.code : "youtube_connection_failed";
+      const allowed = new Set(["youtube_consent_denied", "youtube_callback_missing_parameters", "youtube_state_invalid", "youtube_owner_mismatch", "youtube_scope_rejected", "youtube_code_rejected", "youtube_channel_not_found", "youtube_multiple_channels", "youtube_not_configured", "youtube_connection_failed"]);
+      return res.redirect(302, `/integracoes?youtube=error&reason=${encodeURIComponent(allowed.has(code) ? code : "youtube_connection_failed")}`);
+    }
   });
 
   /** Endpoints privados chamados apenas pelo workflow autenticado via HMAC. */
