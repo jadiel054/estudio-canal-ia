@@ -549,11 +549,11 @@ export async function uploadRenderInput(params: { ideaId: string; fileName: stri
 }
 
 export async function getRenderDownloadAsset(jobId: string) {
-  if (!UUID_PATTERN.test(jobId)) throw new Error("Job de vídeo inválido.");
+  if (!UUID_PATTERN.test(jobId)) return null;
   const result = await requirePool().query<{ status: string; release_id: string | null; asset_id: string | null; file_name: string | null; expires_at: Date | null }>("SELECT status, release_id::text, asset_id::text, file_name, expires_at FROM studio_render_jobs WHERE id = $1::uuid LIMIT 1", [jobId]);
   const job = result.rows[0];
-  if (!job || job.status !== "succeeded" || !job.release_id || !job.asset_id || !job.file_name) throw new Error("O MP4 só fica disponível depois de render e QA concluídos.");
-  if (job.expires_at && job.expires_at.getTime() <= Date.now()) throw new Error("O prazo temporário do asset terminou; solicite um novo render.");
+  if (!job || job.status !== "succeeded" || !job.release_id || !job.asset_id || !job.file_name) return null;
+  if (job.expires_at && job.expires_at.getTime() <= Date.now()) return null;
   return { releaseId: Number(job.release_id), assetId: Number(job.asset_id), fileName: job.file_name };
 }
 

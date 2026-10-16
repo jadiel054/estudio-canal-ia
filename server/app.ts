@@ -5,13 +5,11 @@ import { createContext } from "./_core/context";
 import { publicPlatformScript } from "./_core/publicConfig";
 import { studioPersistenceStatus, verifyStudioDatabase } from "./studioRepository";
 import { timingSafeEqual } from "node:crypto";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import { readSession } from "./auth";
 import { refreshRadar } from "./radar";
 import { RENDER_PATHS, verifyRenderRequestSignature } from "./renderSecurity";
-import { getRenderDownloadAsset, getSignedRenderInput, getSignedRenderManifest, processRenderCallback, synthesizeRenderChunk } from "./renderPipeline";
+import { getSignedRenderInput, getSignedRenderManifest, processRenderCallback, synthesizeRenderChunk } from "./renderPipeline";
 import { callbackStageDiagnostic, classifyRenderFailure, isRenderCallbackStageCode, isRenderOperation, renderFailureLogRecord, type RenderErrorCode, type RenderOperation } from "./renderObservability";
+import { registerRenderDeliveryRoutes } from "./renderDelivery";
 
 function sendRenderFailure(res: Response, operation: RenderOperation, status: number, errorCode: RenderErrorCode, upstreamStatus?: number, detail?: ReturnType<typeof classifyRenderFailure>) {
   const safeDetail = {
@@ -144,33 +142,7 @@ export function registerApiRoutes(app: Express) {
     }
   });
 
-  app.get("/api/render/download/:jobId", async (req, res) => {
-    if (!(await readSession(req))) return res.status(401).json({ error: "unauthorized" });
-    try {
-      const asset = await getRenderDownloadAsset(req.params.jobId);
-      const token = process.env.GITHUB_ACTIONS_TOKEN;
-      if (!token) return res.status(503).json({ error: "render_download_not_configured" });
-      const headers = { authorization: `Bearer ${token}`, accept: "application/octet-stream", "x-github-api-version": "2022-11-28" };
-      const assetUrl = `https://api.github.com/repos/jadiel054/estudio-canal-ia/releases/assets/${asset.assetId}`;
-      const apiResponse = await fetch(assetUrl, { headers, redirect: "manual", signal: AbortSignal.timeout(12_000) });
-      let fileResponse = apiResponse;
-      if (apiResponse.status >= 300 && apiResponse.status < 400) {
-        const location = apiResponse.headers.get("location");
-        if (!location) return res.status(502).json({ error: "github_asset_redirect_missing" });
-        const range = req.get("range");
-        fileResponse = await fetch(location, { headers: range ? { range } : {}, signal: AbortSignal.timeout(50_000) });
-      }
-      if (!fileResponse.ok || !fileResponse.body) return res.status(fileResponse.status === 404 ? 404 : 502).json({ error: "github_asset_unavailable" });
-      res.status(fileResponse.status).set("Content-Type", "video/mp4").set("Accept-Ranges", "bytes").set("Cache-Control", "no-store, private");
-      res.set("Content-Disposition", `${req.query.download === "1" ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(asset.fileName)}`);
-      for (const header of ["content-length", "content-range"]) { const value = fileResponse.headers.get(header); if (value) res.set(header, value); }
-      await pipeline(Readable.fromWeb(fileResponse.body as any), res);
-    } catch (error) {
-      if (res.headersSent) return res.destroy(error instanceof Error ? error : undefined);
-      const message = error instanceof Error ? error.message.slice(0, 250) : "Falha ao abrir o MP4.";
-      return res.status(404).json({ error: "render_file_unavailable", message });
-    }
-  });
+  registerRenderDeliveryRoutes(app);
 
   app.use(
     "/api/trpc",

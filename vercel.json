@@ -6,5 +6,15 @@
   "outputDirectory": "public",
   "functions": { "api/**/*.js": { "maxDuration": 50 } },
   "crons": [{ "path": "/api/cron/radar", "schedule": "0 8 * * *" }],
-  "rewrites": [{ "source": "/((?!api/).*)", "destination": "/index.html" }]
+  "rewrites": [
+    {
+      "source": "/api/render/download/:jobId",
+      "destination": "/api/render?delivery=download&jobId=:jobId"
+    },
+    {
+      "source": "/api/render/preview/:jobId",
+      "destination": "/api/render?delivery=preview&jobId=:jobId"
+    },
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
+  ]
 }
