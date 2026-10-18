@@ -12,6 +12,7 @@ import { callbackStageDiagnostic, classifyRenderFailure, isRenderCallbackStageCo
 import { registerRenderDeliveryRoutes } from "./renderDelivery";
 import { handleYouTubeOAuthCallback, startYouTubeOAuth, YouTubeOAuthError } from "./youtubeOAuth";
 import { readSession } from "./auth";
+import { processVideoGenQueue, pollRunningVideoGenJobs } from "./videoGenWorker";
 
 function sendRenderFailure(res: Response, operation: RenderOperation, status: number, errorCode: RenderErrorCode, upstreamStatus?: number, detail?: ReturnType<typeof classifyRenderFailure>) {
   const safeDetail = {
@@ -34,6 +35,15 @@ function sendRenderFailure(res: Response, operation: RenderOperation, status: nu
   if (safeDetail.retryAfterMs !== undefined) res.set("X-Render-Retry-After-Ms", String(safeDetail.retryAfterMs));
   if (safeDetail.providerModel) res.set("X-Render-TTS-Model", safeDetail.providerModel);
   return res.status(status).json({ error: errorCode, code: errorCode, ...(safeStageCode ? { stageCode: safeStageCode } : {}), ...(upstreamStatus ? { upstreamStatus } : {}), ...safeDetail });
+}
+
+function authorizeCron(req: express.Request): boolean {
+  const configured = process.env.CRON_SECRET;
+  if (!configured) return false;
+  const supplied = req.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+  const expectedBytes = Buffer.from(configured);
+  const suppliedBytes = Buffer.from(supplied);
+  return expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
 }
 
 /** Registers all application API routes without starting a network listener. */
@@ -76,19 +86,40 @@ export function registerApiRoutes(app: Express) {
 
   /** Endpoint exclusivo do Vercel Cron. Só aceita o bearer CRON_SECRET. */
   app.get("/api/cron/radar", async (req, res) => {
-    const configured = process.env.CRON_SECRET;
-    if (!configured) return res.status(503).json({ error: "cron_not_configured" });
-    const supplied = req.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
-    const expectedBytes = Buffer.from(configured);
-    const suppliedBytes = Buffer.from(supplied);
-    const authorized = expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
-    if (!authorized) return res.status(401).json({ error: "unauthorized" });
+    if (!process.env.CRON_SECRET) return res.status(503).json({ error: "cron_not_configured" });
+    if (!authorizeCron(req)) return res.status(401).json({ error: "unauthorized" });
     try {
       const result = await refreshRadar("Sistema", "cron");
       return res.json({ ok: true, total: result.total, classifiedByLLM: result.classifiedByLLM, collectedAt: result.collectedAt, sources: result.sources });
     } catch (error) {
       const message = error instanceof Error ? error.message.slice(0, 300) : "Radar unavailable";
       return res.status(502).json({ error: "radar_refresh_failed", message });
+    }
+  });
+
+  /** Etapa D — processa fila de video_gen (submit no provider / mock). */
+  app.get("/api/cron/video-gen-queue", async (req, res) => {
+    if (!process.env.CRON_SECRET) return res.status(503).json({ error: "cron_not_configured" });
+    if (!authorizeCron(req)) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const result = await processVideoGenQueue(5);
+      return res.json({ ok: true, ...result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message.slice(0, 300) : "video_gen queue failed";
+      return res.status(502).json({ error: "video_gen_queue_failed", message });
+    }
+  });
+
+  /** Etapa D — consulta jobs running e finaliza clips prontos. */
+  app.get("/api/cron/video-gen-poll", async (req, res) => {
+    if (!process.env.CRON_SECRET) return res.status(503).json({ error: "cron_not_configured" });
+    if (!authorizeCron(req)) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const result = await pollRunningVideoGenJobs(20);
+      return res.json({ ok: true, ...result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message.slice(0, 300) : "video_gen poll failed";
+      return res.status(502).json({ error: "video_gen_poll_failed", message });
     }
   });
 
