@@ -6,37 +6,28 @@ import {
   listShotPlansByScript,
   updateShotPlanStatus,
 } from "./videoGenRepository";
-import type { ShotPlan, VideoGenJob, VideoGenMode } from "./videoGenTypes";
+import type { ShotPlan, VideoGenAdapter, VideoGenJob, VideoGenMode } from "./videoGenTypes";
 
-/**
- * Estimativa grosseira de custo em USD por segundo de vídeo.
- * Valores conservadores para planejamento; o custo real vem do callback do provider.
- */
-const COST_PER_SECOND: Record<string, number> = {
-  wan_selfhosted: 0.01,
-  seedance_api: 0.08,
-  pixverse_api: 0.04,
-  kling_api: 0.06,
-  fal_ai: 0.05,
-};
+function costPerSecondFromConfig(adapter: VideoGenAdapter): number {
+  const raw = adapter.config?.cost_per_second;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 0.05;
+}
 
-function estimateCost(provider: string, durationSeconds: number): number {
-  const rate = COST_PER_SECOND[provider] ?? 0.05;
-  return Number((rate * durationSeconds).toFixed(4));
+function estimateCost(adapter: VideoGenAdapter, durationSeconds: number): number {
+  return Number((costPerSecondFromConfig(adapter) * durationSeconds).toFixed(4));
 }
 
 function chooseMode(shot: ShotPlan): VideoGenMode {
-  // Preferir i2v quando há referência de personagem/frame
   if (shot.referenceAssetId) return "i2v";
   return "t2v";
 }
 
 /**
- * Cria video_gen_jobs a partir dos shot_plans aprovados/planejados de um script.
- * Escolhe o adapter ativo de menor prioridade.
- *
- * Se nenhum adapter estiver ativo, retorna a lista de adapters disponíveis
- * (todos inativos) para o operador decidir qual ativar.
+ * Cria video_gen_jobs a partir dos shot_plans de um script.
+ * Escolhe o adapter ativo de menor priority.
+ * Custo vem do config do adapter (cost_per_second * duration).
+ * Duplicatas são barradas pelo unique parcial + check no repositório.
  */
 export async function dispatchVideoGenJobs(params: {
   scriptId: number;
@@ -74,7 +65,7 @@ export async function dispatchVideoGenJobs(params: {
     };
   }
 
-  const chosen = active[0]; // menor priority
+  const chosen = active[0];
   const modeDefault = chooseMode(shots[0]);
 
   const jobs = await createVideoGenJobs(
@@ -87,11 +78,10 @@ export async function dispatchVideoGenJobs(params: {
       negativePrompt:
         "text, watermark, logo, blurry, low quality, distorted face, extra limbs, nsfw",
       referenceAssetId: shot.referenceAssetId,
-      estimatedCost: estimateCost(chosen.provider, shot.durationSeconds),
+      estimatedCost: estimateCost(chosen, shot.durationSeconds),
     })),
   );
 
-  // Marca cenas como generating
   for (const shot of shots) {
     await updateShotPlanStatus(shot.id, "generating");
   }
@@ -102,16 +92,21 @@ export async function dispatchVideoGenJobs(params: {
     target: `script:${scriptId}`,
     details: {
       jobCount: jobs.length,
+      skippedDuplicates: shots.length - jobs.length,
       provider: chosen.provider,
       mode: modeDefault,
       estimatedTotalCost: jobs.reduce((s, j) => s + j.estimatedCost, 0),
+      currency: (chosen.config?.currency as string) ?? "USD",
     },
   });
+
+  const skipped = shots.length - jobs.length;
+  const skipNote = skipped > 0 ? ` (${skipped} cena(s) já tinham job ativo e foram ignoradas)` : "";
 
   return {
     jobs,
     provider: chosen.provider,
     adaptersAvailable,
-    message: `${jobs.length} jobs enfileirados no provider ${chosen.provider}. Nenhum provider externo foi chamado ainda — o worker consome a fila.`,
+    message: `${jobs.length} jobs enfileirados no provider ${chosen.provider}${skipNote}. O worker consome a fila.`,
   };
 }

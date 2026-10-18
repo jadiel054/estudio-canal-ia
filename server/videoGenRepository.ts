@@ -68,7 +68,6 @@ export async function replaceShotPlansForScript(
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    // Remove planos anteriores ainda em planned (replanejamento seguro)
     await client.query(
       `DELETE FROM shot_plans WHERE script_id = $1 AND status = 'planned'`,
       [scriptId],
@@ -164,6 +163,11 @@ export async function listAllVideoGenAdapters(): Promise<VideoGenAdapter[]> {
   }));
 }
 
+/**
+ * Cria jobs apenas para cenas que ainda NÃO têm job ativo (queued/running).
+ * O unique parcial no banco é a trava final; este check evita erro 23505
+ * em retries legítimos e devolve só os jobs realmente inseridos.
+ */
 export async function createVideoGenJobs(
   jobs: Array<{
     shotPlanId: number;
@@ -183,6 +187,14 @@ export async function createVideoGenJobs(
     await client.query("BEGIN");
     const created: VideoGenJob[] = [];
     for (const job of jobs) {
+      const existing = await client.query(
+        `SELECT id FROM video_gen_jobs
+         WHERE shot_plan_id = $1 AND status IN ('queued', 'running')
+         LIMIT 1`,
+        [job.shotPlanId],
+      );
+      if (existing.rowCount && existing.rowCount > 0) continue;
+
       const result = await client.query(
         `INSERT INTO video_gen_jobs
           (shot_plan_id, video_id, provider, mode, prompt, negative_prompt, reference_asset_id, estimated_cost, status)
@@ -232,21 +244,58 @@ export async function listQueuedVideoGenJobs(limit = 10): Promise<VideoGenJob[]>
     `SELECT * FROM video_gen_jobs
      WHERE status = 'queued' AND attempts < max_attempts
      ORDER BY created_at ASC
+     LIMIT $1
+     FOR UPDATE SKIP LOCKED`,
+    [limit],
+  );
+  return result.rows.map(mapJob);
+}
+
+/** Pega até N jobs queued com lock, dentro de transação do caller. */
+export async function claimQueuedVideoGenJobs(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> },
+  limit = 5,
+): Promise<VideoGenJob[]> {
+  const result = await client.query(
+    `SELECT * FROM video_gen_jobs
+     WHERE status = 'queued' AND attempts < max_attempts
+     ORDER BY created_at ASC
+     LIMIT $1
+     FOR UPDATE SKIP LOCKED`,
+    [limit],
+  );
+  return result.rows.map(mapJob);
+}
+
+export async function listRunningVideoGenJobs(limit = 20): Promise<VideoGenJob[]> {
+  const pool = getStudioPool();
+  if (!pool) throw new Error("Neon não configurado.");
+  const result = await pool.query(
+    `SELECT * FROM video_gen_jobs
+     WHERE status = 'running' AND provider_job_id IS NOT NULL
+     ORDER BY started_at ASC NULLS FIRST
      LIMIT $1`,
     [limit],
   );
   return result.rows.map(mapJob);
 }
 
-export async function markVideoGenJobRunning(id: number): Promise<VideoGenJob | null> {
+export async function markVideoGenJobRunning(
+  id: number,
+  providerJobId?: string | null,
+): Promise<VideoGenJob | null> {
   const pool = getStudioPool();
   if (!pool) throw new Error("Neon não configurado.");
   const result = await pool.query(
     `UPDATE video_gen_jobs
-     SET status = 'running', attempts = attempts + 1, started_at = NOW(), error = NULL
+     SET status = 'running',
+         attempts = attempts + 1,
+         started_at = COALESCE(started_at, NOW()),
+         provider_job_id = COALESCE($2, provider_job_id),
+         error = NULL
      WHERE id = $1 AND status IN ('queued', 'failed') AND attempts < max_attempts
      RETURNING *`,
-    [id],
+    [id, providerJobId ?? null],
   );
   return result.rows[0] ? mapJob(result.rows[0]) : null;
 }
@@ -285,4 +334,32 @@ export async function failVideoGenJob(id: number, error: string): Promise<VideoG
     [id, error.slice(0, 2000)],
   );
   return result.rows[0] ? mapJob(result.rows[0]) : null;
+}
+
+export async function insertClipAsset(params: {
+  scriptId: number | null;
+  videoId: number | null;
+  uri: string;
+  cost: number;
+  source: string;
+}): Promise<number> {
+  const pool = getStudioPool();
+  if (!pool) throw new Error("Neon não configurado.");
+  const result = await pool.query(
+    `INSERT INTO assets (script_id, video_id, type, uri, license, source, cost)
+     VALUES ($1, $2, 'clip', $3, 'generated', $4, $5)
+     RETURNING id`,
+    [params.scriptId, params.videoId, params.uri, params.source, params.cost],
+  );
+  return Number(result.rows[0].id);
+}
+
+export async function recordQuotaUsage(api: string, units: number) {
+  const pool = getStudioPool();
+  if (!pool) return;
+  try {
+    await pool.query(`INSERT INTO quota_log (api, units) VALUES ($1, $2)`, [api, units]);
+  } catch {
+    // quota é best-effort
+  }
 }
