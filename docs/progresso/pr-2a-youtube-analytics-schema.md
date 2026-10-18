@@ -1,6 +1,6 @@
 # PR-2A — schema de Analytics YouTube
 
-**Status:** implementação local publicada em PR, sem merge e sem aplicação no Neon.
+**Status:** implementação publicada na PR #28, sem merge; migration aplicada e validada no Neon `main`.
 
 ## Escopo
 
@@ -24,6 +24,18 @@ A validação operacional obrigatória dos métodos e escopos ainda não foi exe
 - teste estático da migration: cobre quatro entidades, grão, nullable, lease, estados, erro sanitizado e separação do Radar;
 - nenhum SQL foi executado no Neon;
 - nenhum token, provider ou endpoint real foi chamado nesta PR.
+
+## Aplicação e validação Neon
+
+Migration aplicada em uma única transação no projeto `estudio-canal-ia`, branch `main`, banco `estudio_canal_ia`. A validação posterior foi somente de leitura e retornou:
+
+- tabelas novas: **4/4**;
+- colunas esperadas: **15/15** em `analytics_collection_runs`, **19/19** em `youtube_video_daily_metrics`, **10/10** em `analytics_insights` e **9/9** em `radar_learning_signals`;
+- índices da migration: **13/13**;
+- constraints: CHECKs presentes nas quatro tabelas, FKs presentes nas quatro tabelas e unicidade/PKs naturais preservadas;
+- linhas de negócio consultadas: **nenhuma**; somente metadados do catálogo foram retornados.
+
+Ainda não foi feita a chamada operacional a `Analytics.reports.query` nem à Reporting API. Isso permanece como validação prévia separada antes de qualquer código da PR-2B, sem ampliação do escopo OAuth.
 
 ## Próximo passo condicionado
 
