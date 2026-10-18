@@ -123,6 +123,29 @@ export async function updateShotPlanStatus(
   return result.rows[0] ? mapShotPlan(result.rows[0]) : null;
 }
 
+export async function updateShotPlan(
+  id: number,
+  patch: { promptText?: string; durationSeconds?: number; description?: string },
+): Promise<ShotPlan | null> {
+  const pool = getStudioPool();
+  if (!pool) throw new Error("Neon não configurado.");
+  const result = await pool.query(
+    `UPDATE shot_plans
+     SET prompt_text = COALESCE($2, prompt_text),
+         duration_seconds = COALESCE($3, duration_seconds),
+         description = COALESCE($4, description)
+     WHERE id = $1 AND status IN ('planned', 'approved')
+     RETURNING *`,
+    [
+      id,
+      patch.promptText ?? null,
+      patch.durationSeconds ?? null,
+      patch.description ?? null,
+    ],
+  );
+  return result.rows[0] ? mapShotPlan(result.rows[0]) : null;
+}
+
 export async function listActiveVideoGenAdapters(): Promise<VideoGenAdapter[]> {
   const pool = getStudioPool();
   if (!pool) throw new Error("Neon não configurado.");
@@ -163,11 +186,6 @@ export async function listAllVideoGenAdapters(): Promise<VideoGenAdapter[]> {
   }));
 }
 
-/**
- * Cria jobs apenas para cenas que ainda NÃO têm job ativo (queued/running).
- * O unique parcial no banco é a trava final; este check evita erro 23505
- * em retries legítimos e devolve só os jobs realmente inseridos.
- */
 export async function createVideoGenJobs(
   jobs: Array<{
     shotPlanId: number;
@@ -251,7 +269,6 @@ export async function listQueuedVideoGenJobs(limit = 10): Promise<VideoGenJob[]>
   return result.rows.map(mapJob);
 }
 
-/** Pega até N jobs queued com lock, dentro de transação do caller. */
 export async function claimQueuedVideoGenJobs(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> },
   limit = 5,
