@@ -24,14 +24,14 @@ describe("Nexo LOP runtime", () => {
       { role: "assistant", content: "O render real exige roteiro aprovado." },
     ], dependencies(complete));
 
-    expect(NEXO_SYSTEM_PROMPT_VERSION).toBe("2.0.0");
+    expect(NEXO_SYSTEM_PROMPT_VERSION).toBe("2.0.1");
     expect(received.slice(-3)).toEqual([
       { role: "user", content: "Quero testar um render curto." },
       { role: "assistant", content: "O render real exige roteiro aprovado." },
       { role: "user", content: "E depois?" },
     ]);
     expect(result.message).toContain("a etapa continua manual");
-    expect(result.promptVersion).toBe("2.0.0");
+    expect(result.promptVersion).toBe("2.0.1");
   });
 
   it("runs tools, feeds verified observations into the next LOP cycle, then reports the model's conclusion", async () => {

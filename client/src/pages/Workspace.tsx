@@ -68,7 +68,21 @@ function Dot({ color = "lime" }: { color?: "lime" | "violet" | "amber" | "coral"
 function Empty({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) { return <Card className="grid min-h-52 place-items-center text-center"><div className="max-w-sm"><div className="mx-auto grid h-11 w-11 place-items-center rounded-2xl bg-[#8d5cff]/12 text-[#b9a5ff]"><Sparkles size={20} /></div><h3 className="mt-3 font-bold text-white">{title}</h3><p className="mt-1.5 text-sm leading-6 text-[#95a2b9]">{description}</p>{action && <div className="mt-4">{action}</div>}</div></Card>; }
 function formatDate(date: string) { return date; }
 /** Selo de dado de demonstração: nada marcado assim é resultado real. */
-function ExampleSeal() { return <span className="tag text-[#ffd98b]" title="Dado de demonstração, não é resultado real do canal">EXEMPLO</span>; }
+function ExampleSeal({ banner = false }: { banner?: boolean }) {
+  if (banner) {
+    return (
+      <div className="my-2 rounded-xl border border-[#ffd98b]/30 bg-[#ffd98b]/[.08] p-3 text-xs font-bold text-[#ffd98b]">
+        ⚠️ Conteúdo de demonstração — não publica
+      </div>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-md border border-[#ffd98b]/30 bg-[#ffd98b]/15 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-[#ffd98b]" title="Dado de demonstração, não é resultado real do canal">
+      <span>EXEMPLO</span>
+      <span className="hidden text-[9px] font-semibold text-[#ffe3a8] sm:inline">(Conteúdo de demonstração — não publica)</span>
+    </span>
+  );
+}
 /** Selo de render simulado: não existe arquivo de vídeo real. */
 function SimulatedSeal() { return <span className="tag text-[#ffaaa3]" title="Render simulado: nenhum arquivo de vídeo foi produzido">SIMULADO</span>; }
 
@@ -163,7 +177,10 @@ function IdeasPage() {
 }
 
 function ScriptsPage() {
-  const { scripts, ideas, updateScript, reviewScript, isReviewingScript, approveScript, requestScriptChanges } = useStudio();
+  const { scripts, ideas, updateScript, reviewScript, isReviewingScript, approveScript, requestScriptChanges, persistedScriptIds, registerPersistedScript } = useStudio();
+  const utils = trpc.useUtils();
+  const persistMutation = trpc.studio.persistApprovedScript.useMutation();
+  const directorMutation = trpc.videoGen.runDirector.useMutation();
   const [selectedId, setSelectedId] = useState(scripts[0]?.id ?? "");
   const selected = scripts.find(script => script.id === selectedId) ?? scripts[0];
   const idea = ideas.find(item => item.id === selected?.ideaId);
@@ -176,6 +193,40 @@ function ScriptsPage() {
   const hasLintSnapshot = currentQa && Array.isArray(selected.qa?.lintDiagnostics);
   const lintErrorCount = lintDiagnostics.filter(item => item.severity === "error").length;
   const lintHasErrors = lintErrorCount > 0;
+
+  const neonScriptId = (selected?.id && persistedScriptIds[selected.id]) || (idea?.id && persistedScriptIds[idea.id]) || undefined;
+
+  const handlePersistAndRunDirector = async (contentToPersist: string) => {
+    try {
+      const res = await persistMutation.mutateAsync({
+        content: contentToPersist,
+        title: selected.title,
+        studioScriptId: selected.id,
+      });
+
+      if (res?.scriptId) {
+        registerPersistedScript(selected.id, res.scriptId);
+        if (idea?.id) registerPersistedScript(idea.id, res.scriptId);
+        toast.success(`Roteiro persistido no Neon (Script #${res.scriptId})`);
+
+        try {
+          await directorMutation.mutateAsync({
+            scriptId: res.scriptId,
+            scriptContent: contentToPersist,
+            title: selected.title,
+          });
+          await utils.videoGen.shotPlans.invalidate({ scriptId: res.scriptId });
+          toast.success("Cenas geradas pelo Diretor de IA");
+        } catch (dirError: any) {
+          toast.error("Falha ao rodar Diretor de IA", { description: dirError.message ?? "Erro ao gerar cenas" });
+        }
+        return res.scriptId;
+      }
+    } catch (persistError: any) {
+      toast.error("Falha ao persistir roteiro no banco", { description: persistError.message ?? "Erro de persistência" });
+    }
+  };
+
   return <><PageHeader eyebrow="PORTÃO 1" title="Roteiros e versões" description="Revise o texto, execute QA na versão atual e só então decida o Portão 1." />
     <div className="grid gap-5 xl:grid-cols-[280px_1fr]">
       <Card className="h-fit"><p className="label">ROTEIROS</p><div className="mt-3 space-y-2">{scripts.map(script => <button type="button" key={script.id} onClick={() => setSelectedId(script.id)} className={`w-full rounded-xl border p-3 text-left ${selected.id === script.id ? "border-[#c6ff4d]/35 bg-[#c6ff4d]/[.07]" : "border-white/[.06] bg-white/[.025] hover:bg-white/[.05]"}`}><div className="flex items-start gap-2"><p className="line-clamp-2 flex-1 text-sm font-bold text-white">{script.title}</p>{script.example && <ExampleSeal />}</div><div className="mt-2 flex justify-between"><span className="text-[10px] text-[#8997af]">v{script.version} · {script.updatedAt}</span><span className={`text-[10px] font-bold ${script.status === "Aprovado" ? "text-[#c6ff4d]" : script.status === "Ajuste pedido" ? "text-[#ffaaa3]" : "text-[#ffd98b]"}`}>{script.status}</span></div></button>)}</div></Card>
@@ -207,27 +258,65 @@ function ScriptsPage() {
             })}</ul> : <p className="mt-3 text-[10px] text-[#a2b0c4]">Nenhum diagnóstico estrutural. Isso não substitui a revisão humana.</p> : <p className="mt-3 text-[10px] leading-4 text-[#e6ce91]">Este QA foi salvo antes do snapshot de lint. Execute o QA do texto atual para visualizar os diagnostics; o servidor ainda revalida o roteiro antes de aprovar ou renderizar.</p>}
           </div>
         </Card> : <div className="mt-4 rounded-xl border border-[#ffd98b]/15 bg-[#ffd98b]/[.04] p-3 text-xs text-[#dccb9e]">{draftChanged ? "O texto foi alterado e o QA anterior não vale para esta versão. Execute o QA do texto atual antes do Portão 1." : "Ainda não há QA neste roteiro. Execute o QA do texto atual; ele será salvo junto com esta versão, sem gerar outro roteiro."}</div>}
+        {Boolean(selected.example || idea.example) && <ExampleSeal banner />}
         <div className="mt-5 flex flex-col gap-3 border-t border-white/[.07] pt-4 sm:flex-row sm:items-center sm:justify-between">
           <p className="max-w-lg text-xs leading-5 text-[#91a0b7]"><span className="font-bold text-[#c6ff4d]">Checklist:</span> gancho específico, código/tela executado, erro real, resultado e CTA sem promessa vazia.</p>
-          <div className="flex flex-wrap gap-2">{selected.status !== "Aprovado" && <Button variant="danger" onClick={() => requestScriptChanges(idea.id)}><Pencil size={14} /> Pedir ajuste</Button>}{selected.status !== "Aprovado" && <Button onClick={() => approveScript(idea.id)} disabled={!currentQa || !hasLintSnapshot || isReviewingScript || lintHasErrors}><Check size={15} /> Aprovar roteiro</Button>}</div>
+          <div className="flex flex-wrap gap-2">
+            {selected.status !== "Aprovado" && <Button variant="danger" onClick={() => requestScriptChanges(idea.id)}><Pencil size={14} /> Pedir ajuste</Button>}
+            {selected.status !== "Aprovado" && (
+              <Button
+                onClick={async () => {
+                  approveScript(idea.id);
+                  await handlePersistAndRunDirector(draft);
+                }}
+                disabled={!currentQa || !hasLintSnapshot || isReviewingScript || lintHasErrors || persistMutation.isPending || directorMutation.isPending}
+              >
+                {persistMutation.isPending || directorMutation.isPending ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}
+                {persistMutation.isPending ? "Persistindo…" : directorMutation.isPending ? "Gerando cenas…" : "Aprovar roteiro"}
+              </Button>
+            )}
+          </div>
         </div>
+        {Boolean(neonScriptId) ? (
+          <ScenePlanPanel neonScriptId={neonScriptId!} title={selected.title} />
+        ) : selected.status === "Aprovado" ? (
+          <Card className="mt-4 border-[#8d5cff]/30 bg-[#8d5cff]/[.05]">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-[10px] font-black tracking-[0.18em] text-[#8d5cff]">PORTÃO 1.5 · CENAS</p>
+                <h3 className="mt-1 text-sm font-black text-white">Roteiro aprovado ainda não persistido no banco</h3>
+                <p className="mt-1 text-xs text-[#8b98af]">Persista no Neon para liberar a geração automática de cenas do Diretor de IA.</p>
+              </div>
+              <Button
+                disabled={persistMutation.isPending || directorMutation.isPending}
+                onClick={() => handlePersistAndRunDirector(draft)}
+              >
+                {persistMutation.isPending || directorMutation.isPending ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+                Persistir roteiro no banco
+              </Button>
+            </div>
+          </Card>
+        ) : null}
       </Card>
     </div>
   </>;
 }
 
 function StudioPage() {
-  const { ideas, scripts, assets, videos, renderJobs, settings, startRender, retryVideo, cleanupRenderAsset, uploadRenderInput, isUploadingRenderInput, isCleaningRenderAsset } = useStudio();
+  const { ideas, scripts, assets, videos, renderJobs, settings, startRender, retryVideo, cleanupRenderAsset, uploadRenderInput, isUploadingRenderInput, isCleaningRenderAsset, persistedScriptIds, registerPersistedScript } = useStudio();
+  const utils = trpc.useUtils();
+  const persistMutation = trpc.studio.persistApprovedScript.useMutation();
+  const directorMutation = trpc.videoGen.runDirector.useMutation();
   const quotaFailedVideoIds = new Set(renderJobs.filter(job => job.status === "failed" && ["tts_quota_daily", "tts_quota_minute", "tts_quota_unknown"].includes(job.errorCode ?? "")).map(job => job.videoId));
   const quotaFailedIdeaIds = new Set(videos.filter(video => quotaFailedVideoIds.has(video.id)).map(video => video.ideaId));
   const producible = ideas.filter(idea => ["assets", "ajuste_pedido"].includes(idea.status) || quotaFailedIdeaIds.has(idea.id) || videos.some(video => video.ideaId === idea.id && ["aguarda_aprov_video", "aprovado_para_agenda", "agendado", "publicado"].includes(video.stage) && !video.simulated));
   const [selectedId, setSelectedId] = useState(producible[0]?.id ?? "");
   const inputRef = useRef<HTMLInputElement>(null);
   const integration = trpc.studio.renderIntegration.useQuery(undefined, { refetchInterval: 30_000 });
-  const utils = trpc.useUtils();
   const setRenderVoiceMode = trpc.studio.setRenderVoiceMode.useMutation({ onSuccess: async result => { await utils.studio.state.invalidate(); toast.success(`Modo de áudio salvo: ${result.voiceMode}`); }, onError: error => toast.error("Não foi possível salvar o modo de áudio", { description: error.message }) });
   const selected = producible.find(idea => idea.id === selectedId);
   const script = scripts.find(item => item.ideaId === selected?.id);
+  const neonScriptId = (script?.id && persistedScriptIds[script.id]) || (selected?.id && persistedScriptIds[selected.id]) || undefined;
   const selectedAssets = assets.filter(asset => asset.scriptId === script?.id && (!asset.scriptVersion || asset.scriptVersion === script?.version));
   const captures = selectedAssets.filter(asset => Boolean(asset.inputAssetId));
   const jobs = renderJobs.filter(job => videos.some(video => video.id === job.videoId && video.ideaId === selected?.id));
@@ -303,7 +392,55 @@ function StudioPage() {
         </Card>
         <Card><div className="flex items-center justify-between"><div><p className="label">HISTÓRICO DE JOBS</p><h2 className="mt-1 font-black text-white">Progresso e falhas</h2></div><span className="tag">Atualiza a cada 15 s</span></div><div className="mt-4 space-y-2">{jobs.length ? jobs.slice(0, 5).map(job => <div key={job.id} className="rounded-xl bg-white/[.035] p-3"><div className="flex items-center justify-between gap-3"><span className="truncate text-xs font-bold text-white">{job.id.slice(0, 8)}… · {job.status}</span><span className="text-xs text-[#a7b2c6]">{job.progress ?? 0}%</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-black/30"><div className="h-full bg-[#c6ff4d] transition-all" style={{ width: `${job.progress ?? 0}%` }} /></div>{job.error && <p className="mt-2 text-[11px] text-[#ffaaa3]">{job.error}</p>}{job.quotaScope && <p className="mt-1 text-[10px] text-[#d8c79c]">Quota {job.quotaScope}{job.quotaValue !== undefined ? ` · valor ${job.quotaValue}` : ""}{job.providerModel ? ` · ${job.providerModel}` : ""}{job.retryAfterMs ? ` · retry mínimo ${Math.ceil(job.retryAfterMs / 60_000)} min` : ""}</p>}</div>) : <p className="text-xs text-[#8d99af]">Ainda não há jobs para esta pauta.</p>}</div></Card>
       </div>
-      <ScenePlanPanel neonScriptId={1} title={selected?.title} />
+      {Boolean(neonScriptId) ? (
+        <ScenePlanPanel neonScriptId={neonScriptId!} title={selected?.title} />
+      ) : (
+        <Card className="mt-4 border-[#8d5cff]/30 bg-[#8d5cff]/[.05]">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-[10px] font-black tracking-[0.18em] text-[#8d5cff]">PORTÃO 1.5 · CENAS</p>
+              <h3 className="mt-1 text-sm font-black text-white">Roteiro não persistido no banco</h3>
+              <p className="mt-1 text-xs text-[#8b98af]">Persista no Neon para que o Diretor de IA gere e exiba o plano de cenas.</p>
+            </div>
+            <Button
+              disabled={!script || persistMutation.isPending || directorMutation.isPending}
+              onClick={async () => {
+                if (!script) return;
+                try {
+                  const res = await persistMutation.mutateAsync({
+                    content: script.content,
+                    title: selected?.title,
+                    studioScriptId: script.id,
+                  });
+
+                  if (res?.scriptId) {
+                    registerPersistedScript(script.id, res.scriptId);
+                    if (selected?.id) registerPersistedScript(selected.id, res.scriptId);
+                    toast.success(`Roteiro persistido no Neon (Script #${res.scriptId})`);
+
+                    try {
+                      await directorMutation.mutateAsync({
+                        scriptId: res.scriptId,
+                        scriptContent: script.content,
+                        title: selected?.title,
+                      });
+                      await utils.videoGen.shotPlans.invalidate({ scriptId: res.scriptId });
+                      toast.success("Cenas geradas pelo Diretor de IA");
+                    } catch (dirError: any) {
+                      toast.error("Falha ao rodar Diretor de IA", { description: dirError.message ?? "Erro ao gerar cenas" });
+                    }
+                  }
+                } catch (persistError: any) {
+                  toast.error("Falha ao persistir roteiro no banco", { description: persistError.message ?? "Erro de persistência" });
+                }
+              }}
+            >
+              {persistMutation.isPending || directorMutation.isPending ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+              Persistir roteiro no banco
+            </Button>
+          </div>
+        </Card>
+      )}
     </div>}
   </>;
 }

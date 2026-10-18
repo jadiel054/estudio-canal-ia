@@ -34,9 +34,11 @@ export type StudioState = {
   settings: StudioSettings;
   audit: AuditEntry[];
   chat: ChatMessage[];
+  persistedScriptIds?: Record<string, number>;
 };
 
 type StudioActions = {
+  registerPersistedScript: (key: string, neonScriptId: number) => void;
   createIdea: (params: Pick<Idea, "title" | "format"> & Partial<Pick<Idea, "trendId" | "origin" | "angle" | "sourceNotes" | "captureUrls">>) => Idea;
   updateScript: (id: string, content: string) => void;
   reviewScript: (id: string, content: string) => void;
@@ -66,7 +68,7 @@ type StudioActions = {
   importDeviceData: () => void;
 };
 
-type StudioContextValue = StudioState & StudioActions & { isGeneratingScript: boolean; isReviewingScript: boolean; isUploadingRenderInput: boolean; isCleaningRenderAsset: boolean };
+type StudioContextValue = StudioState & StudioActions & { persistedScriptIds: Record<string, number>; isGeneratingScript: boolean; isReviewingScript: boolean; isUploadingRenderInput: boolean; isCleaningRenderAsset: boolean };
 const StudioContext = createContext<StudioContextValue | null>(null);
 const storageKey = "estudio-canal-ia-v1";
 
@@ -91,6 +93,11 @@ function isConflict(error: { data?: { code?: string } | null; message: string })
 
 export function StudioProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<StudioState>(initialState);
+  const [persistedScriptIds, setPersistedScriptIds] = useState<Record<string, number>>({});
+  const registerPersistedScript = (key: string, neonScriptId: number) => {
+    if (!key) return;
+    setPersistedScriptIds(prev => ({ ...prev, [key]: neonScriptId }));
+  };
   const deviceSnapshot = useRef(state);
   const [hydrated, setHydrated] = useState(false);
   const [serverBacked, setServerBacked] = useState(false);
@@ -299,7 +306,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   const importDeviceData = () => importState.mutate(deviceSnapshot.current);
 
   const value = useMemo<StudioContextValue>(() => ({
-    ...state, createIdea, updateScript, reviewScript, generateScript, approveScript, requestScriptChanges,
+    ...state, persistedScriptIds, registerPersistedScript, createIdea, updateScript, reviewScript, generateScript, approveScript, requestScriptChanges,
     isGeneratingScript: generateScriptRequest.isPending,
     isReviewingScript: reviewScriptRequest.isPending,
     isUploadingRenderInput: uploadRenderInputRequest.isPending,
@@ -307,7 +314,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     startRender, cleanupRenderAsset, uploadRenderInput, approveVideo, requestVideoChanges, rejectVideo, scheduleVideo, retryVideo, publishVideo, setDemoMode,
     clearExampleData, addAsset, updateSettings,
     setAutomation, selectAdapter, requestPlatformConnection, addChat, applyAgentActions, addAudit, resetDemo, importDeviceData,
-  }), [state, generateScriptRequest.isPending, reviewScriptRequest.isPending, uploadRenderInputRequest.isPending, cleanupRenderAssetRequest.isPending]);
+  }), [state, persistedScriptIds, generateScriptRequest.isPending, reviewScriptRequest.isPending, uploadRenderInputRequest.isPending, cleanupRenderAssetRequest.isPending]);
 
   return <StudioContext.Provider value={value}>{children}</StudioContext.Provider>;
 }

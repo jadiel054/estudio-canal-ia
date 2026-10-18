@@ -17,6 +17,7 @@ import { estimateRenderTtsCalls, renderIntegrationStatus, requestRenderAssetClea
 import { getTtsUsageSummary } from "./ttsUsage";
 import { getYouTubeConnectionStatus, revokeYouTubeConnection } from "./youtubeOAuth";
 import { probeYouTubeAnalytics } from "./youtubeAnalyticsProbe";
+import { persistApprovedScript } from "./scriptBridge";
 import { runVideoDirector, getShotPlans } from "./videoGenDirector";
 import { dispatchVideoGenJobs } from "./videoGenDispatcher";
 import { listVideoGenJobsByScript, listAllVideoGenAdapters, updateShotPlan } from "./videoGenRepository";
@@ -133,6 +134,24 @@ export const appRouter = router({
       await enforceLLMRateLimit(ctx.user.id);
       try { return await reviewScriptForCurrentDraft(input.scriptId, input.content); }
       catch (error) { throw toTrpcError(error); }
+    }),
+    persistApprovedScript: adminProcedure.input(z.object({
+      content: z.string().min(40).max(100_000),
+      title: z.string().max(240).optional(),
+      ideaId: z.number().int().positive().nullable().optional(),
+      studioScriptId: z.string().max(120).optional(),
+    })).mutation(async ({ input }) => {
+      try {
+        return await persistApprovedScript({
+          content: input.content,
+          title: input.title,
+          ideaId: input.ideaId,
+          studioScriptId: input.studioScriptId,
+          actor: "Você",
+        });
+      } catch (error) {
+        throw toTrpcError(error);
+      }
     }),
     command: adminProcedure.input(editorialCommandSchema).mutation(async ({ input }) => {
       try {
