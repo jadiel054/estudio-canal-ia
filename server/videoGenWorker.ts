@@ -6,14 +6,14 @@ import {
   failVideoGenJob,
   insertClipAsset,
   listRunningVideoGenJobs,
-  markVideoGenJobRunning,
   recordQuotaUsage,
   updateShotPlanStatus,
 } from "./videoGenRepository";
 import { resolveProvider } from "./videoGenProviders";
 
+const RUNNING_TIMEOUT_MS = 30 * 60_000;
+
 function requiredCronSecret() {
-  // Reutiliza o mesmo segredo do render para não multiplicar secrets
   const value = process.env.STUDIO_RENDER_HMAC_SECRET;
   if (!value || value.length < 32) {
     throw new Error("STUDIO_RENDER_HMAC_SECRET ausente ou curto demais para proteger o worker de video_gen.");
@@ -21,7 +21,6 @@ function requiredCronSecret() {
   return value;
 }
 
-/** Verifica header x-studio-cron-signature = hex(hmac_sha256(secret, body|path+ts)). */
 export function verifyCronSignature(params: {
   path: string;
   timestamp: string;
@@ -43,10 +42,6 @@ export function verifyCronSignature(params: {
   }
 }
 
-/**
- * processQueue: pega até 5 jobs queued com FOR UPDATE SKIP LOCKED,
- * submete no provider, grava provider_job_id e status running.
- */
 export async function processVideoGenQueue(limit = 5) {
   const pool = getStudioPool();
   if (!pool) throw new Error("Neon não configurado.");
@@ -113,17 +108,24 @@ export async function processVideoGenQueue(limit = 5) {
   return { submitted, failures };
 }
 
-/**
- * pollRunning: consulta providers dos jobs running;
- * quando pronto, grava asset + custo real + quota_log.
- */
 export async function pollRunningVideoGenJobs(limit = 20) {
   const running = await listRunningVideoGenJobs(limit);
   const completed: number[] = [];
   const failed: number[] = [];
+  const timedOut: number[] = [];
   const stillRunning: number[] = [];
 
   for (const job of running) {
+    // Timeout: running há mais de 30 min → failed (libera a unique parcial)
+    const startedMs = job.startedAt ? Date.parse(job.startedAt) : NaN;
+    if (Number.isFinite(startedMs) && Date.now() - startedMs > RUNNING_TIMEOUT_MS) {
+      await failVideoGenJob(job.id, "timeout");
+      await updateShotPlanStatus(job.shotPlanId, "failed");
+      timedOut.push(job.id);
+      failed.push(job.id);
+      continue;
+    }
+
     if (!job.providerJobId) continue;
     try {
       const provider = resolveProvider(job.provider);
@@ -141,7 +143,6 @@ export async function pollRunningVideoGenJobs(limit = 20) {
         continue;
       }
 
-      // succeeded
       const downloaded = await provider.download(poll.downloadUrl);
       const assetId = await insertClipAsset({
         scriptId: null,
@@ -170,9 +171,14 @@ export async function pollRunningVideoGenJobs(limit = 20) {
       actor: "Sistema",
       action: "video_gen pollRunning",
       target: "video_gen_jobs",
-      details: { completed: completed.length, failed: failed.length, stillRunning: stillRunning.length },
+      details: {
+        completed: completed.length,
+        failed: failed.length,
+        timedOut: timedOut.length,
+        stillRunning: stillRunning.length,
+      },
     });
   }
 
-  return { completed, failed, stillRunning };
+  return { completed, failed, timedOut, stillRunning };
 }
