@@ -17,6 +17,9 @@ import { estimateRenderTtsCalls, renderIntegrationStatus, requestRenderAssetClea
 import { getTtsUsageSummary } from "./ttsUsage";
 import { getYouTubeConnectionStatus, revokeYouTubeConnection } from "./youtubeOAuth";
 import { probeYouTubeAnalytics } from "./youtubeAnalyticsProbe";
+import { runVideoDirector, getShotPlans } from "./videoGenDirector";
+import { dispatchVideoGenJobs } from "./videoGenDispatcher";
+import { listVideoGenJobsByScript, listAllVideoGenAdapters } from "./videoGenRepository";
 
 async function enforceLLMRateLimit(userId: string) { if (!(await consumeRateLimit(`llm:${userId}`, 20))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Limite de 20 chamadas LLM por minuto atingido. Tente novamente em instantes." }); }
 const taskSchema = z.enum(["roteiro", "qa", "agente", "leve"]);
@@ -181,6 +184,51 @@ export const appRouter = router({
       if (!guard.allowed) throw new TRPCError({ code: "FORBIDDEN", message: guard.reason });
       await appendStudioAudit({ actor: "Você", action: "Publicação autorizada após verificação Neon", target: video.title, details: { videoId: input.videoId, automation, simulated: Boolean(video.simulated), demoMode: state.settings?.demoMode === true } });
       return { allowed: true, automation, message: automation === "Automática" ? "Publicação automática autorizada: vídeo aprovado no Portão 2 e confirmação explícita registrada no Neon." : "Publicação manual autorizada após verificação dos portões no Neon. Exporte o vídeo e publique você mesmo." };
+    }),
+  }),
+  /**
+   * Etapa D — Motor de geração de vídeo (híbrido).
+   * Diretor de IA gera shot_plans; dispatcher cria video_gen_jobs.
+   * Nenhum provider externo é chamado até o worker consumir a fila
+   * e existir adapter ativo com credenciais.
+   */
+  videoGen: router({
+    adapters: adminProcedure.query(async () => listAllVideoGenAdapters()),
+    shotPlans: adminProcedure.input(z.object({ scriptId: z.number().int().positive() })).query(async ({ input }) => getShotPlans(input.scriptId)),
+    jobs: adminProcedure.input(z.object({ scriptId: z.number().int().positive() })).query(async ({ input }) => listVideoGenJobsByScript(input.scriptId)),
+    runDirector: adminProcedure.input(z.object({
+      scriptId: z.number().int().positive(),
+      scriptContent: z.string().min(40).max(100_000),
+      title: z.string().max(240).optional(),
+    })).mutation(async ({ input, ctx }) => {
+      await enforceLLMRateLimit(ctx.user.id);
+      if (!(await consumeRateLimit(`video-director:${ctx.user.id}`, 3))) {
+        throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Limite do Diretor de IA atingido. Aguarde um minuto." });
+      }
+      try {
+        return await runVideoDirector({
+          scriptId: input.scriptId,
+          scriptContent: input.scriptContent,
+          title: input.title,
+          actor: "Você",
+        });
+      } catch (error) {
+        throw toTrpcError(error);
+      }
+    }),
+    dispatchJobs: adminProcedure.input(z.object({
+      scriptId: z.number().int().positive(),
+      videoId: z.number().int().positive().optional(),
+    })).mutation(async ({ input }) => {
+      try {
+        return await dispatchVideoGenJobs({
+          scriptId: input.scriptId,
+          videoId: input.videoId ?? null,
+          actor: "Você",
+        });
+      } catch (error) {
+        throw toTrpcError(error);
+      }
     }),
   }),
   llm: router({
