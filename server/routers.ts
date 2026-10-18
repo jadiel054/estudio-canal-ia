@@ -4,8 +4,7 @@ import { z } from "zod";
 import { canPublishVideo } from "@shared/workflowPolicy";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, publicProcedure, router } from "./_core/trpc";
-import { runNexo, redactNexoText, sanitizeNexoHistory, truncateForHistory } from "./agent/runtime";
-import { persistApprovedScript } from "./scriptBridge";
+import { runNexo, redactNexoText } from "./agent/runtime";
 import { appendStudioAudit, consumeRateLimit, getStudioState, hasApprovedAutomaticPublication, resolveAgentConfirmation, saveStudioNonEditorialState, saveStudioState, StateConflictError, studioPersistenceStatus, verifyStudioDatabase } from "./studioRepository";
 import { completeWithFallback, getProviderSettings, getProviderUsage, testProvider, updateProviderSettings, THINKING_LEVELS, type LLMProviderId, type LLMTask } from "./llmProviders";
 import { authConfigSummary, changeOwnerPassword, clearSessionCookie, invalidateAllSessions, loginOwner } from "./auth";
@@ -18,6 +17,7 @@ import { estimateRenderTtsCalls, renderIntegrationStatus, requestRenderAssetClea
 import { getTtsUsageSummary } from "./ttsUsage";
 import { getYouTubeConnectionStatus, revokeYouTubeConnection } from "./youtubeOAuth";
 import { probeYouTubeAnalytics } from "./youtubeAnalyticsProbe";
+import { persistApprovedScript } from "./scriptBridge";
 import { runVideoDirector, getShotPlans } from "./videoGenDirector";
 import { dispatchVideoGenJobs } from "./videoGenDispatcher";
 import { listVideoGenJobsByScript, listAllVideoGenAdapters, updateShotPlan } from "./videoGenRepository";
@@ -75,48 +75,14 @@ export const appRouter = router({
   agent: router({
     chat: adminProcedure.input(z.object({
       message: z.string().trim().min(1).max(1600),
-      // Aceita até 20k no schema; sanitizeNexoHistory trunca cabeça+cauda antes do LLM.
-      history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(20_000) })).max(10).optional(),
+      history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(1200) })).max(10).optional(),
     })).mutation(async ({ input, ctx }) => {
       await enforceLLMRateLimit(ctx.user.id);
-      try {
-        const safeHistory = sanitizeNexoHistory(input.history ?? []);
-        return await runNexo(input.message, safeHistory);
-      } catch (error) {
+      try { return await runNexo(input.message, input.history ?? []); }
+      catch (error) {
         const message = error instanceof Error ? error.message : "Falha temporária dos provedores.";
         return { message: `${redactNexoText(message, 300)} Tente de novo.`, actions: [] as any[] };
       }
-    }),
-    /** Desbloqueia thread envenenada: trunca mensagens longas em studio_state.chat. */
-    sanitizeChat: adminProcedure.mutation(async () => {
-      const state = await getStudioState() as any;
-      if (!state) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Estado não importado para o Neon." });
-      const chat = Array.isArray(state.chat) ? state.chat : [];
-      let truncated = 0;
-      const cleaned = chat.map((item: any) => {
-        const text = typeof item?.text === "string" ? item.text : "";
-        if (text.length <= 1000) return item;
-        truncated += 1;
-        return { ...item, text: truncateForHistory(text, 1000) };
-      });
-      const now = new Date().toISOString();
-      try {
-        await saveStudioNonEditorialState({
-          ...state,
-          chat: cleaned,
-          audit: [{
-            id: randomUUID(),
-            actor: "Você",
-            action: "Chat sanitizado (mensagens longas truncadas)",
-            target: "studio_state.chat",
-            at: now,
-            detail: `${truncated} mensagem(ns) truncada(s)`,
-          }, ...(state.audit ?? [])].slice(0, 500),
-        });
-      } catch (error) {
-        throw toTrpcError(error);
-      }
-      return { truncated, total: cleaned.length } as const;
     }),
     confirm: adminProcedure.input(z.object({ confirmationId: z.string().uuid(), approved: z.boolean() })).mutation(async ({ input }) => { const resolved = await resolveAgentConfirmation(input.confirmationId, input.approved); if (!resolved) throw new TRPCError({ code: "BAD_REQUEST", message: "Confirmação expirada ou já resolvida." }); if (!input.approved) { await appendStudioAudit({ actor: "Você", action: "Ação sensível cancelada", target: resolved.action, details: { confirmationId: input.confirmationId } }); return { approved: false, message: "Ação cancelada. Nada foi executado." }; } if (resolved.action !== "publicacao_automatica") { await appendStudioAudit({ actor: "Você", action: "Ação sensível confirmada", target: resolved.action, details: { confirmationId: input.confirmationId } }); return { approved: true, message: "Confirmação registrada." }; } const state = await getStudioState() as any; if (!state) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Importe o estado deste aparelho para o Neon antes de confirmar." }); state.settings = { ...state.settings, automation: { ...state.settings.automation, publicacao: "Automática" } }; state.audit = [{ id: randomUUID(), actor: "Você", action: "Publicação automática confirmada", target: "publicacao", at: new Date().toISOString(), detail: "Alteração persistida no Neon" }, ...(state.audit ?? [])].slice(0, 500); await saveStudioState(state, { allowPublicationAutomation: true }); await appendStudioAudit({ actor: "Você", action: "Publicação automática confirmada", target: "publicacao", details: { confirmationId: input.confirmationId } }); return { approved: true, message: "Publicação automática ativada após sua confirmação explícita." }; }),
   }),
@@ -169,9 +135,8 @@ export const appRouter = router({
       try { return await reviewScriptForCurrentDraft(input.scriptId, input.content); }
       catch (error) { throw toTrpcError(error); }
     }),
-    /** Persiste roteiro aprovado em scripts + reviews (gate 1). Retorna scriptId numérico para videoGen. */
     persistApprovedScript: adminProcedure.input(z.object({
-      content: z.string().trim().min(40).max(100_000),
+      content: z.string().min(40).max(100_000),
       title: z.string().max(240).optional(),
       ideaId: z.number().int().positive().nullable().optional(),
       studioScriptId: z.string().max(120).optional(),
@@ -180,7 +145,7 @@ export const appRouter = router({
         return await persistApprovedScript({
           content: input.content,
           title: input.title,
-          ideaId: input.ideaId ?? null,
+          ideaId: input.ideaId,
           studioScriptId: input.studioScriptId,
           actor: "Você",
         });
@@ -293,17 +258,17 @@ export const appRouter = router({
     complete: adminProcedure.input(z.object({ task: taskSchema, messages: z.array(messageSchema).min(1).max(12), preferred: z.enum(["gemini", "groq"]).optional() }).superRefine((input, ctx) => { const total = input.messages.reduce((sum, item) => sum + item.content.length, 0); if (total > 60_000) ctx.addIssue({ code: "custom", message: "O total das mensagens excede 60.000 caracteres." }); })).mutation(async ({ input, ctx }) => { await enforceLLMRateLimit(ctx.user.id); return completeWithFallback(input.task as LLMTask, input.messages, input.preferred); }),
   }),
   tts: router({
-    settings: adminProcedure.query(() => getTtsSettings()),
-    updateSettings: adminProcedure.input(ttsSettingsSchema).mutation(({ input }) => updateTtsSettings(input)),
+    settings: adminProcedure.query(async () => ({ ...await getTtsSettings(), configured: Boolean(process.env.STUDIO_LLM_GEMINI_KEY), dataPolicy: "O nível gratuito pode usar entradas e saídas para melhoria de produtos e revisão humana; não envie dados sensíveis." })),
+    updateSettings: adminProcedure.input(ttsSettingsSchema).mutation(async ({ input }) => updateTtsSettings(input)),
     testConnection: adminProcedure.mutation(async ({ ctx }) => {
-      if (!(await consumeRateLimit(`tts-connection:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "O teste de TTS pode ser executado uma vez por minuto." });
-      return testTtsConnection();
+      if (!(await consumeRateLimit(`tts-connection:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "O teste de conexão TTS pode ser executado uma vez por minuto." });
+      return testTtsConnection(await getTtsSettings());
     }),
-    generate: adminProcedure.input(z.object({ text: z.string().trim().min(1).max(5000), style: z.enum(TTS_NARRATION_STYLE).optional() })).mutation(async ({ input, ctx }) => {
-      await enforceLLMRateLimit(ctx.user.id);
-      if (!(await consumeRateLimit(`tts-generate:${ctx.user.id}`, 5))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Limite de geração TTS atingido. Aguarde um minuto." });
-      const result = await generateSpeechCached(input.text, input.style);
-      return { audioBase64: Buffer.from(result.audio).toString("base64"), contentType: result.contentType, model: result.model, voice: result.voice, fallback: result.fallback, bytes: result.audio.length };
+    test: adminProcedure.mutation(async ({ ctx }) => {
+      if (!(await consumeRateLimit(`tts-test:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "A amostra de voz pode ser gerada uma vez por minuto." });
+      const settings = await getTtsSettings();
+      const result = await generateSpeechCached("Olá! Este é um teste de voz em português brasileiro para o Estúdio de Canal IA.", settings, TTS_NARRATION_STYLE, "connection_test");
+      return { audioBase64: result.audio.toString("base64"), contentType: result.contentType, model: result.model, voice: result.voice, fallback: result.fallback, bytes: result.audio.length };
     }),
   }),
 });
