@@ -2,6 +2,8 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 import { getStudioPool } from "./studioRepository";
 
 export const YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly";
+export const YOUTUBE_ANALYTICS_READONLY_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly";
+const REQUIRED_READONLY_SCOPES = [YOUTUBE_READONLY_SCOPE, YOUTUBE_ANALYTICS_READONLY_SCOPE] as const;
 export const YOUTUBE_OAUTH_REDIRECT_URI = "https://estudio-canal-ia.vercel.app/api/integrations/youtube/callback";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
@@ -41,7 +43,7 @@ function scopesFrom(value: unknown): string[] {
   return [...new Set(raw.map(item => item.trim()).filter(Boolean))];
 }
 function assertReadOnlyScopes(scopes: string[]) {
-  if (scopes.length !== 1 || scopes[0] !== YOUTUBE_READONLY_SCOPE) throw new YouTubeOAuthError("youtube_scope_rejected");
+  if (scopes.length !== REQUIRED_READONLY_SCOPES.length || REQUIRED_READONLY_SCOPES.some(scope => !scopes.includes(scope))) throw new YouTubeOAuthError("youtube_scope_rejected");
 }
 function seal(value: string) {
   const iv = randomBytes(12);
@@ -74,7 +76,7 @@ export async function startYouTubeOAuth(ownerId: string, workspaceId = "default"
   url.searchParams.set("client_id", configuredClientId);
   url.searchParams.set("redirect_uri", YOUTUBE_OAUTH_REDIRECT_URI);
   url.searchParams.set("response_type", "code");
-  url.searchParams.set("scope", YOUTUBE_READONLY_SCOPE);
+  url.searchParams.set("scope", REQUIRED_READONLY_SCOPES.join(" "));
   url.searchParams.set("access_type", "offline");
   url.searchParams.set("prompt", "consent");
   url.searchParams.set("state", state);
@@ -92,7 +94,7 @@ async function exchangeCode(code: string, fetcher: typeof fetch) {
   try { body = await response.json(); } catch { /* resposta sanitizada */ }
   if (!response.ok || typeof body.access_token !== "string") throw new YouTubeOAuthError(body.error === "invalid_grant" ? "youtube_code_rejected" : "youtube_token_exchange_failed");
   const scopes = scopesFrom(body.scope);
-  assertReadOnlyScopes(scopes.length ? scopes : [YOUTUBE_READONLY_SCOPE]);
+  assertReadOnlyScopes(scopes);
   if (typeof body.refresh_token !== "string" || !body.refresh_token) throw new YouTubeOAuthError("youtube_refresh_token_missing");
   return { accessToken: body.access_token as string, refreshToken: body.refresh_token as string, scopes, expiresIn: Number.isFinite(Number(body.expires_in)) ? Math.max(60, Number(body.expires_in)) : 3_600 };
 }
@@ -147,7 +149,7 @@ export async function handleYouTubeOAuthCallback(params: { code?: string; state?
        VALUES ($1::uuid, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11, $12, NOW() + ($13::int * INTERVAL '1 second'), NOW(), NOW(), NULL)
        ON CONFLICT (owner_id, workspace_id, channel_id)
        DO UPDATE SET scopes = EXCLUDED.scopes, access_token_ciphertext = EXCLUDED.access_token_ciphertext, access_token_iv = EXCLUDED.access_token_iv, access_token_tag = EXCLUDED.access_token_tag, refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext, refresh_token_iv = EXCLUDED.refresh_token_iv, refresh_token_tag = EXCLUDED.refresh_token_tag, key_version = EXCLUDED.key_version, access_token_expires_at = EXCLUDED.access_token_expires_at, updated_at = NOW(), revoked_at = NULL`,
-      [randomUUID(), state.owner_id, state.workspace_id, channelId, token.scopes.length ? token.scopes : [YOUTUBE_READONLY_SCOPE], access.ciphertext, access.iv, access.tag, refresh.ciphertext, refresh.iv, refresh.tag, keyVersion(), token.expiresIn]
+      [randomUUID(), state.owner_id, state.workspace_id, channelId, token.scopes, access.ciphertext, access.iv, access.tag, refresh.ciphertext, refresh.iv, refresh.tag, keyVersion(), token.expiresIn]
     );
     await client.query("COMMIT");
     return { ownerId: state.owner_id, workspaceId: state.workspace_id, channelId, channelName: channel.name };

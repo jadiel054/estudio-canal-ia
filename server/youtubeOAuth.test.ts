@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { handleYouTubeOAuthCallback, startYouTubeOAuth, YOUTUBE_OAUTH_REDIRECT_URI, YouTubeOAuthError } from "./youtubeOAuth";
+import { handleYouTubeOAuthCallback, startYouTubeOAuth, YOUTUBE_ANALYTICS_READONLY_SCOPE, YOUTUBE_OAUTH_REDIRECT_URI, YOUTUBE_READONLY_SCOPE, YouTubeOAuthError } from "./youtubeOAuth";
 
 function poolForStart() {
   return { query: vi.fn(async () => ({ rows: [], rowCount: 1 })), connect: vi.fn() } as any;
@@ -15,7 +15,7 @@ describe("OAuth YouTube read-only", () => {
     const url = new URL(result.url);
     expect(url.origin).toBe("https://accounts.google.com");
     expect(url.searchParams.get("redirect_uri")).toBe(YOUTUBE_OAUTH_REDIRECT_URI);
-    expect(url.searchParams.get("scope")).toBe("https://www.googleapis.com/auth/youtube.readonly");
+    expect(url.searchParams.get("scope")).toBe(`${YOUTUBE_READONLY_SCOPE} ${YOUTUBE_ANALYTICS_READONLY_SCOPE}`);
     expect(url.searchParams.get("scope")).not.toContain("youtube.upload");
     expect(url.searchParams.get("state")).toHaveLength(43);
     expect(result.expiresAt.toISOString()).toBe("2026-01-01T00:10:00.000Z");
@@ -34,7 +34,7 @@ describe("OAuth YouTube read-only", () => {
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }), release: vi.fn() };
     const pool = { query: vi.fn(), connect: vi.fn(async () => client) } as any;
     const fetcher = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "access", refresh_token: "refresh", scope: "https://www.googleapis.com/auth/youtube.readonly", expires_in: 3600 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "access", refresh_token: "refresh", scope: `${YOUTUBE_READONLY_SCOPE} ${YOUTUBE_ANALYTICS_READONLY_SCOPE}`, expires_in: 3600 }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ items: [{ id: "UC123", snippet: { title: "Canal real" } }] }), { status: 200 }));
     const result = await handleYouTubeOAuthCallback({ code: "code", state }, undefined, { pool, fetcher });
     expect(result).toMatchObject({ ownerId: "owner:one", channelId: "channel-db-id", channelName: "Canal real" });
@@ -49,6 +49,16 @@ describe("OAuth YouTube read-only", () => {
     await expect(handleYouTubeOAuthCallback({ code: "code" }, undefined, { pool: poolForStart(), fetcher: vi.fn() })).rejects.toMatchObject({ code: "youtube_callback_missing_parameters" });
     const client = { query: vi.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] }), release: vi.fn() };
     await expect(handleYouTubeOAuthCallback({ code: "code", state: "used" }, undefined, { pool: { connect: vi.fn(async () => client) } as any })).rejects.toMatchObject({ code: "youtube_state_invalid" });
+  });
+
+  it("rejeita callback que retorna somente um dos dois escopos", async () => {
+    vi.stubEnv("YOUTUBE_CLIENT_ID", "client-id");
+    vi.stubEnv("YOUTUBE_CLIENT_SECRET", "client-secret");
+    const client = { query: vi.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ owner_id: "owner:one", workspace_id: "default", redirect_uri: YOUTUBE_OAUTH_REDIRECT_URI }] }), release: vi.fn() };
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "access", refresh_token: "refresh", scope: YOUTUBE_READONLY_SCOPE, expires_in: 3600 }), { status: 200 }));
+    await expect(handleYouTubeOAuthCallback({ code: "code", state: "state" }, undefined, { pool: { connect: vi.fn(async () => client) } as any, fetcher })).rejects.toMatchObject({ code: "youtube_scope_rejected" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(client.release).toHaveBeenCalled();
   });
 
   it("usa somente códigos sanitizados para falha do OAuth", () => {
