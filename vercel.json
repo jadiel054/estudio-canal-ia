@@ -6,7 +6,9 @@
   "outputDirectory": "public",
   "functions": { "api/**/*.js": { "maxDuration": 50 } },
   "crons": [
-    { "path": "/api/cron/radar", "schedule": "0 8 * * *" }
+    { "path": "/api/cron/radar", "schedule": "0 8 * * *" },
+    { "path": "/api/cron/video-gen-queue", "schedule": "* * * * *" },
+    { "path": "/api/cron/video-gen-poll", "schedule": "* * * * *" }
   ],
   "rewrites": [
     {
