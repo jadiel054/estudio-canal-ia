@@ -16,6 +16,7 @@ import { generateSpeechCached, getTtsSettings, testTtsConnection, TTS_NARRATION_
 import { estimateRenderTtsCalls, renderIntegrationStatus, requestRenderAssetCleanup, startRenderPipeline, testGitHubActionsConnection, uploadRenderInput } from "./renderPipeline";
 import { getTtsUsageSummary } from "./ttsUsage";
 import { getYouTubeConnectionStatus, revokeYouTubeConnection } from "./youtubeOAuth";
+import { probeYouTubeAnalytics } from "./youtubeAnalyticsProbe";
 
 async function enforceLLMRateLimit(userId: string) { if (!(await consumeRateLimit(`llm:${userId}`, 20))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Limite de 20 chamadas LLM por minuto atingido. Tente novamente em instantes." }); }
 const taskSchema = z.enum(["roteiro", "qa", "agente", "leve"]);
@@ -61,6 +62,12 @@ export const appRouter = router({
     changePassword: adminProcedure.input(z.object({ currentPassword: z.string().min(1).max(256), newPassword: z.string().min(12).max(256) })).mutation(async ({ input }) => { if (!(await changeOwnerPassword(input.currentPassword, input.newPassword))) throw new TRPCError({ code: "UNAUTHORIZED", message: "Senha atual inválida." }); return { success: true } as const; }),
     logoutAll: adminProcedure.mutation(async ({ ctx }) => { await invalidateAllSessions(); clearSessionCookie(ctx.res); return { success: true } as const; }),
     logout: publicProcedure.mutation(({ ctx }) => { clearSessionCookie(ctx.res); return { success: true } as const; }),
+  }),
+  youtube: router({
+    probeAnalytics: adminProcedure.mutation(async ({ ctx }) => {
+      if (!(await consumeRateLimit(`youtube-analytics-probe:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "O diagnóstico Analytics pode ser executado uma vez por minuto." });
+      return probeYouTubeAnalytics(ctx.user.id, "default");
+    }),
   }),
   agent: router({
     chat: adminProcedure.input(z.object({
