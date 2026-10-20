@@ -229,6 +229,8 @@ export const studioStateSchema = z.object({
   settings: studioSettingsSchema,
   audit: z.array(auditEntrySchema).max(500),
   chat: z.array(chatMessageSchema).max(300),
+  /** Mapa studioScriptId/ideaId → scripts.id numérico no Neon (Portão 1 → 1.5). */
+  persistedScriptIds: z.record(z.string().min(1).max(120), z.number().int().positive().max(1_000_000_000)).optional(),
 });
 
 export type ValidatedStudioState = z.infer<typeof studioStateSchema>;
