@@ -105,7 +105,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   const deviceSnapshot = useRef(state);
   const [hydrated, setHydrated] = useState(false);
   const [serverBacked, setServerBacked] = useState(false);
-  const stateQuery = trpc.studio.state.useQuery(undefined, { retry: 1, refetchOnWindowFocus: false, refetchInterval: 15_000 });
+  const stateQuery = trpc.studio.state.useQuery(undefined, { retry: 1, refetchOnWindowFocus: true, refetchInterval: 15_000 });
   const saveState = trpc.studio.saveState.useMutation({
     onError: error => {
       if (isConflict(error)) {

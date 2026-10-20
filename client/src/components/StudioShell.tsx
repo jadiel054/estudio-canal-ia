@@ -4,7 +4,10 @@ import {
   Home, Layers3, Menu, MoreHorizontal, Radar, RadioTower, Settings2, ShieldCheck,
   Sparkles, Workflow, X,
 } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { SyncStatus } from "@/components/state";
+import { invalidateStudioQueries } from "@/lib/studioRefresh";
+import { trpc } from "@/lib/trpc";
 
 export type Section =
   | "home" | "radar" | "pautas" | "roteiros" | "estudio" | "fila"
@@ -30,6 +33,48 @@ export const navItems: NavItem[] = [
 
 const primary = navItems.filter(item => ["home", "radar", "estudio", "fila"].includes(item.id));
 
+/** Refresh global: manual + ao voltar para a aba. */
+function GlobalSyncBar() {
+  const utils = trpc.useUtils();
+  const stateQuery = trpc.studio.state.useQuery(undefined, {
+    retry: 1,
+    refetchOnWindowFocus: true,
+    refetchInterval: 15_000,
+  });
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      await invalidateStudioQueries(utils, "all");
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [utils]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void invalidateStudioQueries(utils, "all");
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [utils]);
+
+  const lastSyncedAt = stateQuery.dataUpdatedAt
+    ? new Date(stateQuery.dataUpdatedAt).toISOString()
+    : null;
+
+  return (
+    <SyncStatus
+      lastSyncedAt={lastSyncedAt}
+      isSyncing={isRefreshing || stateQuery.isFetching}
+      onRefresh={() => void refresh()}
+    />
+  );
+}
+
 export function StudioShell({ children, section }: { children: React.ReactNode; section: Section }) {
   const [location] = useLocation();
   const [moreOpen, setMoreOpen] = useState(false);
@@ -42,18 +87,26 @@ export function StudioShell({ children, section }: { children: React.ReactNode; 
         <nav className="mt-9 space-y-1" aria-label="Navegação principal">
           {navItems.map(item => <DesktopNavItem key={item.id} item={item} active={section === item.id} />)}
         </nav>
-        <div className="mt-auto rounded-2xl border border-[#c6ff4d]/15 bg-[#c6ff4d]/[0.06] p-3.5">
-          <div className="flex items-center gap-2 text-xs font-semibold text-[#c6ff4d]"><span className="h-2 w-2 animate-pulse rounded-full bg-[#c6ff4d]" />NEXO · OPERACIONAL</div>
-          <p className="mt-2 text-xs leading-5 text-[#9faac1]">Sua publicação continua protegida por dois portões humanos.</p>
+        <div className="mt-auto space-y-3">
+          <div className="flex justify-center">
+            <GlobalSyncBar />
+          </div>
+          <div className="rounded-2xl border border-[#c6ff4d]/15 bg-[#c6ff4d]/[0.06] p-3.5">
+            <div className="flex items-center gap-2 text-xs font-semibold text-[#c6ff4d]"><span className="h-2 w-2 animate-pulse rounded-full bg-[#c6ff4d]" />NEXO · OPERACIONAL</div>
+            <p className="mt-2 text-xs leading-5 text-[#9faac1]">Sua publicação continua protegida por dois portões humanos.</p>
+          </div>
         </div>
       </aside>
 
       <main className="pb-24 lg:ml-[254px] lg:pb-8">
-        <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-white/7 bg-[#090d17]/90 px-4 backdrop-blur-xl lg:hidden">
+        <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-2 border-b border-white/7 bg-[#090d17]/90 px-4 backdrop-blur-xl lg:hidden">
           <Brand compact />
-          <Link href="/agente" className="nexo-pulse inline-flex h-10 items-center gap-2 rounded-xl border border-[#8d5cff]/40 bg-[#8d5cff]/10 px-3 text-xs font-bold text-[#d7c8ff]">
-            <Bot size={15} /> Nexo
-          </Link>
+          <div className="flex items-center gap-2">
+            <GlobalSyncBar />
+            <Link href="/agente" className="nexo-pulse inline-flex h-10 items-center gap-2 rounded-xl border border-[#8d5cff]/40 bg-[#8d5cff]/10 px-3 text-xs font-bold text-[#d7c8ff]">
+              <Bot size={15} /> Nexo
+            </Link>
+          </div>
         </header>
         <div className="mx-auto max-w-[1440px] px-4 pt-5 sm:px-6 lg:px-9 lg:pt-8">{children}</div>
       </main>
