@@ -8,47 +8,56 @@ interface Props {
 
 interface State {
   hasError: boolean;
-  error: Error | null;
+  errorCode: string | null;
+}
+
+function supportCodeFromError(error: unknown): string {
+  const name = error instanceof Error && error.name ? error.name : "Error";
+  const compact = name.replace(/[^A-Za-z0-9]/g, "").slice(0, 12).toUpperCase() || "UNKNOWN";
+  const stamp = Date.now().toString(36).slice(-4).toUpperCase();
+  return `UI_${compact}_${stamp}`;
 }
 
 class ErrorBoundary extends Component<Props, State> {
   constructor(props: Props) {
     super(props);
-    this.state = { hasError: false, error: null };
+    this.state = { hasError: false, errorCode: null };
   }
 
   static getDerivedStateFromError(error: Error): State {
-    return { hasError: true, error };
+    return { hasError: true, errorCode: supportCodeFromError(error) };
+  }
+
+  componentDidCatch(error: Error) {
+    console.error("[ErrorBoundary]", this.state.errorCode, error.name);
   }
 
   render() {
     if (this.state.hasError) {
       return (
-        <div className="flex items-center justify-center min-h-screen p-8 bg-background">
-          <div className="flex flex-col items-center w-full max-w-2xl p-8">
-            <AlertTriangle
-              size={48}
-              className="text-destructive mb-6 flex-shrink-0"
-            />
-
-            <h2 className="text-xl mb-4">An unexpected error occurred.</h2>
-
-            <div className="p-4 w-full rounded bg-muted overflow-auto mb-6">
-              <pre className="text-sm text-muted-foreground whitespace-break-spaces">
-                {this.state.error?.stack}
-              </pre>
-            </div>
-
+        <div className="flex min-h-screen items-center justify-center bg-[#0b1220] p-8">
+          <div className="flex w-full max-w-md flex-col items-center rounded-2xl border border-[#ff7b70]/20 bg-[#111827]/90 p-8 text-center shadow-[0_16px_50px_rgba(0,0,0,.35)]">
+            <AlertTriangle size={40} className="mb-5 flex-shrink-0 text-[#ffaaa3]" aria-hidden />
+            <h2 className="text-lg font-black text-white">Ocorreu um erro inesperado</h2>
+            <p className="mt-3 text-sm leading-6 text-[#9ba7bd]">
+              A interface encontrou um problema e precisou parar esta tela. Seus dados no servidor n\u00e3o
+              foram alterados por este erro.
+            </p>
+            {this.state.errorCode ? (
+              <p className="mt-3 font-mono text-[11px] uppercase tracking-wide text-[#8e9bb0]">
+                C\u00f3digo de suporte: {this.state.errorCode}
+              </p>
+            ) : null}
             <button
+              type="button"
               onClick={() => window.location.reload()}
               className={cn(
-                "flex items-center gap-2 px-4 py-2 rounded-lg",
-                "bg-primary text-primary-foreground",
-                "hover:opacity-90 cursor-pointer"
+                "mt-6 flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-black",
+                "bg-[#c6ff4d] text-[#111827] hover:opacity-90",
               )}
             >
-              <RotateCcw size={16} />
-              Reload Page
+              <RotateCcw size={16} aria-hidden />
+              Recarregar
             </button>
           </div>
         </div>
