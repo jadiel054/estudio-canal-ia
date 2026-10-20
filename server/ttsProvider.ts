@@ -20,6 +20,27 @@ export const ttsSettingsSchema = z.object({
 });
 export type TtsSettings = z.infer<typeof ttsSettingsSchema>;
 export type TtsModel = typeof TTS_MODELS[number];
+export type TtsVoice = typeof TTS_VOICES[number];
+
+/** Resposta pública de tts.settings — sem segredos. */
+export type TtsSettingsResponse = TtsSettings & {
+  configured: boolean;
+  dataPolicy: string;
+};
+
+/** Resposta pública de tts.test / amostra de voz. */
+export type TtsSampleResponse = {
+  audioBase64: string;
+  contentType: "audio/wav";
+  model: TtsModel;
+  voice: TtsVoice;
+  fallback: boolean;
+  bytes: number;
+};
+
+export const TTS_DATA_POLICY =
+  "O nível gratuito pode usar entradas e saídas para melhoria de produtos e revisão humana; não envie dados sensíveis.";
+
 const TTS_SETTINGS_KEY = "tts_provider_settings";
 
 export async function getTtsSettings(): Promise<TtsSettings> {
@@ -35,10 +56,20 @@ export async function updateTtsSettings(value: TtsSettings): Promise<TtsSettings
   return parsed.data;
 }
 
+/** Settings + flag configured, sem revelar a chave. */
+export async function getTtsSettingsResponse(): Promise<TtsSettingsResponse> {
+  const settings = await getTtsSettings();
+  return {
+    ...settings,
+    configured: Boolean(process.env.STUDIO_LLM_GEMINI_KEY),
+    dataPolicy: TTS_DATA_POLICY,
+  };
+}
+
 const TIMEOUT_MS = 45_000;
 const MAX_TEXT_CHARS = 2_000;
 const EXPECTED_SAMPLE_RATE = 24_000;
-export const MAX_TTS_ATTEMPTS_PER_MODEL = 3; // chamada inicial + até 2 retries
+export const MAX_TTS_ATTEMPTS_PER_MODEL = 3;
 const MAX_INLINE_RETRY_DELAY_MS = 30_000;
 export const TTS_NARRATION_STYLE = "Português brasileiro neutro, natural e claro; ritmo de tutorial técnico, sem música e sem efeitos.";
 
@@ -68,7 +99,7 @@ export type SpeechResult = {
   audio: Buffer;
   contentType: "audio/wav";
   model: TtsModel;
-  voice: typeof TTS_VOICES[number];
+  voice: TtsVoice;
   fallback: boolean;
   cached?: boolean;
 };
@@ -130,7 +161,6 @@ function classifyQuotaScope(metric?: string, id?: string, providerDescription?: 
   return "unknown";
 }
 
-/** Extrai apenas identificadores e números permitidos; nunca retorna a mensagem bruta do provedor. */
 export function parseTtsQuotaDiagnostic(body: unknown, retryAfterHeader?: string | null, now = Date.now()): TtsQuotaDiagnostic {
   const root = isRecord(body) ? body : {};
   const error = isRecord(root.error) ? root.error : {};
@@ -271,7 +301,7 @@ function usageEvent(model: TtsModel, purpose: TtsPurpose, outcome: "success" | "
   };
 }
 
-async function generateWithModel(text: string, model: TtsModel, voice: typeof TTS_VOICES[number], style: string, purpose: TtsPurpose): Promise<Buffer> {
+async function generateWithModel(text: string, model: TtsModel, voice: TtsVoice, style: string, purpose: TtsPurpose): Promise<Buffer> {
   const key = process.env.STUDIO_LLM_GEMINI_KEY;
   if (!key) throw new TtsProviderError("A chave Gemini não está configurada no ambiente do Estúdio.", undefined, "invalid_key", model);
   const controller = new AbortController();
@@ -306,7 +336,6 @@ async function generateWithModel(text: string, model: TtsModel, voice: typeof TT
         response.status, kind, model, quota,
       );
     }
-
     const audioBlock = findAudioBlock(body);
     if (!audioBlock || audioBlock.data.length < 100) {
       logMissingAudio(response.status, body);
@@ -314,7 +343,6 @@ async function generateWithModel(text: string, model: TtsModel, voice: typeof TT
       recorded = true;
       throw new TtsProviderError("Gemini TTS retornou áudio vazio ou inválido.", response.status, "unavailable", model);
     }
-
     let audio: Buffer;
     try { audio = Buffer.from(audioBlock.data, "base64"); }
     catch { throw new TtsProviderError("Gemini TTS retornou áudio base64 inválido.", response.status, "invalid_audio", model); }
@@ -351,7 +379,7 @@ function isRetryable(error: TtsProviderError): boolean {
   return error.kind === "unavailable" && [500, 502, 503, 504].includes(error.status ?? 0);
 }
 
-async function generateWithRetry(text: string, model: TtsModel, voice: typeof TTS_VOICES[number], style: string, purpose: TtsPurpose): Promise<Buffer> {
+async function generateWithRetry(text: string, model: TtsModel, voice: TtsVoice, style: string, purpose: TtsPurpose): Promise<Buffer> {
   let lastError: TtsProviderError | undefined;
   for (let attempt = 0; attempt < MAX_TTS_ATTEMPTS_PER_MODEL; attempt += 1) {
     try { return await generateWithModel(text, model, voice, style, purpose); }
@@ -359,43 +387,13 @@ async function generateWithRetry(text: string, model: TtsModel, voice: typeof TT
       lastError = error instanceof TtsProviderError ? error : new TtsProviderError("Falha temporária no Gemini TTS.", undefined, "network", model);
       if (!isRetryable(lastError) || attempt === MAX_TTS_ATTEMPTS_PER_MODEL - 1) throw lastError;
       const delay = retryDelay(lastError, attempt);
-      // Se o provedor recomenda uma espera longa, paramos em vez de desrespeitar Retry-After.
       if (delay === undefined) throw lastError;
       await wait(delay);
     }
   }
-  throw lastError ?? new TtsProviderError("Gemini TTS indisponível.", undefined, "unavailable", model);
+  throw lastError ?? new TtsProviderError("Falha temporária no Gemini TTS.", undefined, "network", model);
 }
 
-function preferredFailure(errors: TtsProviderError[]): TtsProviderError {
-  const selected = errors.find(error => error.kind === "quota_daily")
-    ?? errors.find(error => error.kind === "quota_minute")
-    ?? errors.find(error => error.kind === "quota_unknown")
-    ?? errors[0];
-  if (!selected) return new TtsProviderError("Gemini TTS principal e fallback falharam.");
-  if (selected.kind === "quota_daily") return new TtsProviderError("A quota diária Gemini TTS foi atingida nos modelos configurados.", selected.status, selected.kind, selected.model, selected.quota);
-  if (selected.kind === "quota_minute") return new TtsProviderError("O limite de janela curta do Gemini TTS foi atingido; aguarde o intervalo indicado antes de tentar novamente.", selected.status, selected.kind, selected.model, selected.quota);
-  if (selected.kind === "quota_unknown") return new TtsProviderError("Gemini TTS retornou HTTP 429, mas a resposta não identificou a dimensão da quota.", selected.status, selected.kind, selected.model, selected.quota);
-  return new TtsProviderError("Gemini TTS principal e fallback falharam.", selected.status, selected.kind, selected.model, selected.quota);
-}
-
-async function generateAcrossModels(text: string, settings: TtsSettings, style: string, purpose: TtsPurpose): Promise<SpeechResult> {
-  const errors: TtsProviderError[] = [];
-  const models = [settings.primaryModel, settings.fallbackModel] as const;
-  for (const [index, model] of models.entries()) {
-    try {
-      const audio = await generateWithRetry(text, model, settings.voice, style, purpose);
-      return { audio, contentType: "audio/wav", model, voice: settings.voice, fallback: index === 1, cached: false };
-    } catch (error) {
-      const typed = error instanceof TtsProviderError ? error : new TtsProviderError("Falha de rede ao gerar voz no Gemini TTS.", undefined, "network", model);
-      errors.push(typed);
-      if (typed.kind === "invalid_key") break;
-    }
-  }
-  throw preferredFailure(errors);
-}
-
-/** Gera narração usando principal/fallback. Chamadas de quota curta recebem retry/backoff limitado. */
 export async function generateSpeech(
   text: string,
   settings: TtsSettings = DEFAULT_TTS_SETTINGS,
@@ -406,10 +404,28 @@ export async function generateSpeech(
   if (!clean || clean.length > MAX_TEXT_CHARS) throw new TtsProviderError(`O trecho de narração deve ter entre 1 e ${MAX_TEXT_CHARS} caracteres.`);
   const validated = ttsSettingsSchema.safeParse(settings);
   if (!validated.success) throw new TtsProviderError("Configuração do adaptador TTS inválida.");
-  return generateAcrossModels(clean, validated.data, style, purpose);
+  const { primaryModel, fallbackModel, voice } = validated.data;
+  try {
+    const audio = await generateWithRetry(clean, primaryModel, voice, style, purpose);
+    return { audio, contentType: "audio/wav", model: primaryModel, voice, fallback: false };
+  } catch (primaryError) {
+    const typed = primaryError instanceof TtsProviderError ? primaryError : undefined;
+    if (typed?.kind === "invalid_key") throw primaryError;
+    try {
+      const audio = await generateWithRetry(clean, fallbackModel, voice, style, purpose);
+      return { audio, contentType: "audio/wav", model: fallbackModel, voice, fallback: true };
+    } catch {
+      throw new TtsProviderError(
+        typed?.message ? `${typed.message} O principal e o fallback falharam.` : "O principal e o fallback do Gemini TTS falharam.",
+        typed?.status,
+        typed?.kind ?? "unavailable",
+        primaryModel,
+        typed?.quota,
+      );
+    }
+  }
 }
 
-/** Cache compartilhado por conteúdo/modelo/voz/estilo; somente o hash da fala é a chave persistida. */
 export async function generateSpeechCached(
   text: string,
   settings: TtsSettings = DEFAULT_TTS_SETTINGS,
@@ -420,31 +436,48 @@ export async function generateSpeechCached(
   if (!clean || clean.length > MAX_TEXT_CHARS) throw new TtsProviderError(`O trecho de narração deve ter entre 1 e ${MAX_TEXT_CHARS} caracteres.`);
   const validated = ttsSettingsSchema.safeParse(settings);
   if (!validated.success) throw new TtsProviderError("Configuração do adaptador TTS inválida.");
-  const models = [validated.data.primaryModel, validated.data.fallbackModel] as const;
-  for (const [index, model] of models.entries()) {
-    const cacheKey = ttsAudioCacheKey({ text: clean, model, voice: validated.data.voice, style });
-    const cached = await getCachedTtsAudio(cacheKey, model, purpose);
-    if (cached) return { audio: cached, contentType: "audio/wav", model, voice: validated.data.voice, fallback: index === 1, cached: true };
-  }
-  const generated = await generateAcrossModels(clean, validated.data, style, purpose);
-  const cacheKey = ttsAudioCacheKey({ text: clean, model: generated.model, voice: generated.voice, style });
-  await saveCachedTtsAudio({ cacheKey, model: generated.model, voice: generated.voice, audio: generated.audio });
-  return generated;
+  const { primaryModel, voice } = validated.data;
+  const cacheKey = ttsAudioCacheKey({ text: clean, model: primaryModel, voice, style });
+  const cached = await getCachedTtsAudio(cacheKey, primaryModel, purpose);
+  if (cached) return { audio: cached, contentType: "audio/wav", model: primaryModel, voice, fallback: false, cached: true };
+  const result = await generateSpeech(clean, validated.data, style, purpose);
+  await saveCachedTtsAudio({ cacheKey, audio: result.audio, model: result.model, purpose });
+  return { ...result, cached: false };
 }
 
-/** Testa a chave e os dois modelos sem expor o áudio ao cliente. */
+/** Gera amostra curta de voz para a UI (rate-limited no router). */
+export async function generateTtsSample(settings?: TtsSettings): Promise<TtsSampleResponse> {
+  const resolved = settings ?? (await getTtsSettings());
+  const result = await generateSpeechCached(
+    "Olá! Este é um teste de voz em português brasileiro para o Estúdio de Canal IA.",
+    resolved,
+    TTS_NARRATION_STYLE,
+    "connection_test",
+  );
+  return {
+    audioBase64: result.audio.toString("base64"),
+    contentType: "audio/wav",
+    model: result.model,
+    voice: result.voice,
+    fallback: result.fallback,
+    bytes: result.audio.length,
+  };
+}
+
 export async function testTtsConnection(settings: TtsSettings = DEFAULT_TTS_SETTINGS): Promise<TtsConnectionResult> {
   const started = Date.now();
   if (!process.env.STUDIO_LLM_GEMINI_KEY) return { ok: false, status: "not_configured", latencyMs: Date.now() - started, message: "A chave Gemini não está configurada no ambiente do Estúdio." };
   const validated = ttsSettingsSchema.safeParse(settings);
-  if (!validated.success) return { ok: false, status: "tts_unavailable", latencyMs: Date.now() - started, message: "Configuração do adaptador TTS inválida." };
-  const models = [validated.data.primaryModel, validated.data.fallbackModel] as const;
-  for (const [index, model] of models.entries()) {
+  if (!validated.success) return { ok: false, status: "tts_unavailable", latencyMs: Date.now() - started, message: "Configuração TTS inválida." };
+  const models: TtsModel[] = [validated.data.primaryModel, validated.data.fallbackModel];
+  for (const model of models) {
     try {
-      await generateWithRetry("Conexão TTS OK.", model, validated.data.voice, "Português brasileiro neutro, natural e claro.", "connection_test");
-      return { ok: true, status: "ok", model, fallback: index === 1, latencyMs: Date.now() - started, message: index === 1 ? "Conexão OK pelo fallback TTS." : "Conexão OK pelo modelo principal." };
+      await generateWithModel("ok", model, validated.data.voice, TTS_NARRATION_STYLE, "connection_test");
+      return { ok: true, status: "ok", model, fallback: model === validated.data.fallbackModel, latencyMs: Date.now() - started, message: "Gemini TTS operacional." };
     } catch (error) {
-      if (error instanceof TtsProviderError && error.kind === "invalid_key") return { ok: false, status: "invalid_key", latencyMs: Date.now() - started, message: "A chave Gemini foi recusada ou não tem permissão para o TTS." };
+      if (error instanceof TtsProviderError && error.kind === "invalid_key") {
+        return { ok: false, status: "invalid_key", latencyMs: Date.now() - started, message: "A chave Gemini foi recusada ou não tem permissão para o TTS." };
+      }
     }
   }
   return { ok: false, status: "tts_unavailable", latencyMs: Date.now() - started, message: "A chave Gemini não foi recusada, mas o TTS está indisponível ou sem quota nos modelos configurados." };

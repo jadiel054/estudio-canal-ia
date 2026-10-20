@@ -13,7 +13,14 @@ import { executeEditorialCommand, type EditorialCommand } from "./editorial";
 import { parseStudioState, StateTooLargeError } from "./studioStateSchema";
 import { getRadarState, refreshRadar } from "./radar";
 import { generateScriptForIdea, reviewScriptForCurrentDraft } from "./scriptPipeline";
-import { generateSpeechCached, getTtsSettings, testTtsConnection, TTS_NARRATION_STYLE, ttsSettingsSchema, updateTtsSettings } from "./ttsProvider";
+import {
+  generateTtsSample,
+  getTtsSettings,
+  getTtsSettingsResponse,
+  testTtsConnection,
+  ttsSettingsSchema,
+  updateTtsSettings,
+} from "./ttsProvider";
 import { estimateRenderTtsCalls, renderIntegrationStatus, requestRenderAssetCleanup, startRenderPipeline, testGitHubActionsConnection, uploadRenderInput } from "./renderPipeline";
 import { getTtsUsageSummary } from "./ttsUsage";
 import { getYouTubeConnectionStatus, revokeYouTubeConnection } from "./youtubeOAuth";
@@ -75,7 +82,6 @@ export const appRouter = router({
   agent: router({
     chat: adminProcedure.input(z.object({
       message: z.string().trim().min(1).max(1600),
-      // Aceita até 20k no schema; sanitizeNexoHistory trunca cabeça+cauda antes do LLM.
       history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(20_000) })).max(10).optional(),
     })).mutation(async ({ input, ctx }) => {
       await enforceLLMRateLimit(ctx.user.id);
@@ -87,7 +93,6 @@ export const appRouter = router({
         return { message: `${redactNexoText(message, 300)} Tente de novo.`, actions: [] as any[] };
       }
     }),
-    /** Desbloqueia thread envenenada: trunca mensagens longas em studio_state.chat. */
     sanitizeChat: adminProcedure.mutation(async () => {
       const state = await getStudioState() as any;
       if (!state) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Estado não importado para o Neon." });
@@ -169,7 +174,6 @@ export const appRouter = router({
       try { return await reviewScriptForCurrentDraft(input.scriptId, input.content); }
       catch (error) { throw toTrpcError(error); }
     }),
-    /** Persiste roteiro aprovado em scripts + reviews (gate 1). Retorna scriptId numérico para videoGen. */
     persistApprovedScript: adminProcedure.input(z.object({
       content: z.string().trim().min(40).max(100_000),
       title: z.string().max(240).optional(),
@@ -293,17 +297,25 @@ export const appRouter = router({
     complete: adminProcedure.input(z.object({ task: taskSchema, messages: z.array(messageSchema).min(1).max(12), preferred: z.enum(["gemini", "groq"]).optional() }).superRefine((input, ctx) => { const total = input.messages.reduce((sum, item) => sum + item.content.length, 0); if (total > 60_000) ctx.addIssue({ code: "custom", message: "O total das mensagens excede 60.000 caracteres." }); })).mutation(async ({ input, ctx }) => { await enforceLLMRateLimit(ctx.user.id); return completeWithFallback(input.task as LLMTask, input.messages, input.preferred); }),
   }),
   tts: router({
-    settings: adminProcedure.query(() => getTtsSettings()),
-    updateSettings: adminProcedure.input(ttsSettingsSchema).mutation(({ input }) => updateTtsSettings(input)),
+    /** Settings + flag `configured` (sem revelar a chave). */
+    settings: adminProcedure.query(async () => getTtsSettingsResponse()),
+    updateSettings: adminProcedure.input(ttsSettingsSchema).mutation(async ({ input }) => updateTtsSettings(input)),
+    /** Testa disponibilidade/chave sem devolver áudio. */
     testConnection: adminProcedure.mutation(async ({ ctx }) => {
-      if (!(await consumeRateLimit(`tts-connection:${ctx.user.id}`, 1))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "O teste de TTS pode ser executado uma vez por minuto." });
-      return testTtsConnection();
+      if (!(await consumeRateLimit(`tts-connection:${ctx.user.id}`, 1))) {
+        throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "O teste de conexão TTS pode ser executado uma vez por minuto." });
+      }
+      return testTtsConnection(await getTtsSettings());
     }),
-    generate: adminProcedure.input(z.object({ text: z.string().trim().min(1).max(5000), style: z.enum(TTS_NARRATION_STYLE).optional() })).mutation(async ({ input, ctx }) => {
-      await enforceLLMRateLimit(ctx.user.id);
-      if (!(await consumeRateLimit(`tts-generate:${ctx.user.id}`, 5))) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Limite de geração TTS atingido. Aguarde um minuto." });
-      const result = await generateSpeechCached(input.text, input.style);
-      return { audioBase64: Buffer.from(result.audio).toString("base64"), contentType: result.contentType, model: result.model, voice: result.voice, fallback: result.fallback, bytes: result.audio.length };
+    /**
+     * Gera amostra curta de voz (áudio base64).
+     * Mantido como `test` por compatibilidade com a UI; semanticamente é sample.
+     */
+    test: adminProcedure.mutation(async ({ ctx }) => {
+      if (!(await consumeRateLimit(`tts-test:${ctx.user.id}`, 1))) {
+        throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "A amostra de voz pode ser gerada uma vez por minuto." });
+      }
+      return generateTtsSample(await getTtsSettings());
     }),
   }),
 });
