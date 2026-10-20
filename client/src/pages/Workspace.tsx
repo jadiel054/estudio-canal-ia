@@ -15,6 +15,7 @@ import { useStudio } from "@/store/StudioStore";
 import { trpc } from "@/lib/trpc";
 import { LLMProviderSettings } from "@/components/LLMProviderSettings";
 import { ScenePlanPanel } from "@/components/ScenePlanPanel";
+import { RadarControls, RadarQueryBanner } from "@/components/state/RadarControls";
 
 const chartData = [
   { day: "Seg", views: 440, ctr: 4.1 }, { day: "Ter", views: 680, ctr: 5.4 }, { day: "Qua", views: 540, ctr: 4.8 },
@@ -133,8 +134,28 @@ function RadarPage() {
   const sourceStatuses = radarQuery.data?.sources ?? [];
   const lastRun = radarQuery.data?.lastRun;
   return <>
-    <PageHeader eyebrow="PESQUISA DIÁRIA" title="Radar de tendências" description="Sinais públicos de Hacker News, GitHub e dev.to. Crescimento, aderência e lacuna são estimativas explicáveis; valide antes de pautar." action={<Button variant="secondary" disabled={refresh.isPending || !persisted} onClick={() => refresh.mutate()}><RefreshCw size={15} className={refresh.isPending ? "animate-spin" : ""} /> {refresh.isPending ? "Coletando…" : "Atualizar agora"}</Button>} />
-    {!persisted && <div className="mb-4 rounded-xl border border-[#ffd98b]/20 bg-[#ffd98b]/[.06] p-3 text-xs leading-5 text-[#d6c69f]">O banco do Radar ainda não está disponível. A lista abaixo é demonstração marcada; a coleta real aparecerá quando o Neon estiver conectado.</div>}
+    <PageHeader
+      eyebrow="PESQUISA DIÁRIA"
+      title="Radar de tendências"
+      description="Sinais públicos de Hacker News, GitHub e dev.to. Crescimento, aderência e lacuna são estimativas explicáveis; valide antes de pautar."
+      action={
+        <RadarControls
+          lastSyncedAt={lastRun?.finishedAt}
+          isSyncing={refresh.isPending || radarQuery.isFetching}
+          canRefresh={persisted}
+          isPending={refresh.isPending}
+          onRefresh={() => refresh.mutate()}
+        />
+      }
+    />
+    <RadarQueryBanner
+      isError={Boolean(radarQuery.isError)}
+      isLoading={Boolean(radarQuery.isLoading)}
+      onRetry={() => void radarQuery.refetch()}
+    />
+    {!persisted && !radarQuery.isLoading && !radarQuery.isError && (
+      <div className="mb-4 rounded-xl border border-[#ffd98b]/20 bg-[#ffd98b]/[.06] p-3 text-xs leading-5 text-[#d6c69f]">O banco do Radar ainda não está disponível. A lista abaixo é demonstração marcada; a coleta real aparecerá quando o Neon estiver conectado.</div>
+    )}
     {persisted && <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/[.07] bg-white/[.025] px-3 py-2 text-[11px] text-[#98a5bb]">
       <span>{realSignals.length} sinais recentes · dados persistidos no Neon · score: volume 20%, crescimento 25%, lacuna 25%, aderência 30%</span>
       <span>{lastRun ? `Última coleta: ${new Date(lastRun.finishedAt).toLocaleString("pt-BR")}` : "Ainda não houve coleta"}</span>
