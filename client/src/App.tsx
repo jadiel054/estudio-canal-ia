@@ -3,6 +3,9 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
 import Workspace from "@/pages/Workspace";
 import LoginPage from "@/pages/Login";
+import AnalyticsRoute from "@/pages/studio/AnalyticsPage";
+import LivesRoute from "@/pages/studio/LivesPage";
+import LogsRoute from "@/pages/studio/LogsPage";
 import { StudioProvider } from "@/store/StudioStore";
 import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -18,12 +21,12 @@ function Router() {
     <Route path="/estudio" component={() => <Workspace section="estudio" />} />
     <Route path="/fila" component={() => <Workspace section="fila" />} />
     <Route path="/publicacoes" component={() => <Workspace section="publicacoes" />} />
-    <Route path="/lives" component={() => <Workspace section="lives" />} />
-    <Route path="/analytics" component={() => <Workspace section="analytics" />} />
+    <Route path="/lives" component={LivesRoute} />
+    <Route path="/analytics" component={AnalyticsRoute} />
     <Route path="/agente" component={() => <Workspace section="agente" />} />
     <Route path="/integracoes" component={() => <Workspace section="integracoes" />} />
     <Route path="/configuracoes" component={() => <Workspace section="configuracoes" />} />
-    <Route path="/logs" component={() => <Workspace section="logs" />} />
+    <Route path="/logs" component={LogsRoute} />
     <Route path="/404" component={NotFound} />
     <Route component={NotFound} />
   </Switch>;
